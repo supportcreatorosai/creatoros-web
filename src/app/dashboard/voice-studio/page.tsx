@@ -1,9 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { Mic, Play, Pause, Volume2, Settings2, Sparkles, Wand2, Loader2, Save, Trash2, Video, X } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { Mic, Play, Pause, Volume2, Settings2, Sparkles, Wand2, Loader2, Save, Trash2, Video, X, Upload, ChevronDown, HardDrive, BookOpen } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { saveVoiceAction, getSavedVoicesAction, deleteVoiceAction, SavedVoice } from "@/app/actions/voice-actions";
+import { getLessonsAction } from "@/app/actions/ai-actions";
+import type { GeneratedLesson } from "@/lib/ai/types";
 import Link from "next/link";
 
 const voices = [
@@ -35,6 +37,70 @@ const getMatchingVoice = (preset: typeof voices[0], availableVoices: SpeechSynth
   return availableVoices[0];
 };
 
+// Split text into sentence-sized chunks short enough for speechSynthesis to handle reliably
+const splitIntoChunks = (text: string, maxLength = 200) => {
+  const sentences = text.replace(/\s+/g, " ").match(/[^.!?]+[.!?]*/g) || [];
+  const chunks: string[] = [];
+  let current = "";
+
+  const pushPiece = (piece: string) => {
+    if ((current + " " + piece).trim().length <= maxLength) {
+      current = (current + " " + piece).trim();
+    } else {
+      if (current) chunks.push(current);
+      current = piece.trim();
+    }
+  };
+
+  for (const sentence of sentences) {
+    if (sentence.trim().length <= maxLength) {
+      pushPiece(sentence);
+    } else {
+      // Break very long sentences on word boundaries
+      for (const word of sentence.split(" ")) pushPiece(word);
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+};
+
+type LessonListItem ={ id: string; title: string; topic: string | null; script: string | null; created_at: string };
+
+// Turn a generated lesson into a narration script suitable for text-to-speech
+const lessonToScript = (lesson: Partial<GeneratedLesson>) => {
+  const parts: string[] = [];
+  if (lesson.title) parts.push(`${lesson.title}.`);
+  if (lesson.introduction) parts.push(lesson.introduction);
+  if (lesson.learningObjectives?.length) {
+    parts.push(`In this lesson, you will: ${lesson.learningObjectives.join("; ")}.`);
+  }
+  lesson.sections?.forEach(section => {
+    parts.push(`${section.heading}.`);
+    parts.push(section.content);
+  });
+  if (lesson.examples?.length) {
+    parts.push(`Here are some examples. ${lesson.examples.join(" ")}`);
+  }
+  if (lesson.keyPoints?.length) {
+    parts.push(`Key points to remember. ${lesson.keyPoints.join(" ")}`);
+  }
+  if (lesson.summary) parts.push(`To summarize. ${lesson.summary}`);
+  return parts.join("\n\n");
+};
+
+// Lesson scripts are stored as JSON; fall back to the raw text if it isn't a lesson
+const scriptFromText = (text: string) => {
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && (parsed.sections || parsed.introduction || parsed.summary)) {
+      return lessonToScript(parsed);
+    }
+  } catch {
+    // Not JSON, use as plain text
+  }
+  return text;
+};
+
 export default function VoiceStudioPage() {
   const router = useRouter();
   const [selectedVoice, setSelectedVoice] = useState(0);
@@ -56,6 +122,17 @@ export default function VoiceStudioPage() {
   const [isNameModalOpen, setIsNameModalOpen] = useState(false);
   const [tempVoiceName, setTempVoiceName] = useState("");
   const [expandedScript, setExpandedScript] = useState<string | null>(null);
+
+  // Import state
+  const [isImportMenuOpen, setIsImportMenuOpen] = useState(false);
+  const [isLessonModalOpen, setIsLessonModalOpen] = useState(false);
+  const [lessons, setLessons] = useState<LessonListItem[]>([]);
+  const [isLoadingLessons, setIsLoadingLessons] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Speech playback state
+  const speechSessionRef = useRef(0);
+  const availableVoicesRef = useRef<SpeechSynthesisVoice[]>([]);
   
   // Fetch saved voices on mount
   useEffect(() => {
@@ -87,24 +164,113 @@ export default function VoiceStudioPage() {
       const increment = 100 / totalSteps;
 
       interval = setInterval(() => {
-        setProgress(p => {
-          if (p >= 100) {
-            setIsPlaying(false);
-            return 100;
-          }
-          return p + increment;
-        });
+        // Estimated progress; holds at 99% until speech actually finishes
+        setProgress(p => Math.min(p + increment, 99));
       }, updateIntervalMs);
     }
     return () => clearInterval(interval);
   }, [isPlaying, durationSeconds]);
 
-  // Cleanup speech synthesis on unmount
+  // Load browser voices (Chrome populates them asynchronously) and cleanup on unmount
   useEffect(() => {
+    if (!window.speechSynthesis) return;
+    const loadVoices = () => { availableVoicesRef.current = window.speechSynthesis.getVoices(); };
+    loadVoices();
+    window.speechSynthesis.addEventListener("voiceschanged", loadVoices);
+    const sessionRef = speechSessionRef;
     return () => {
-      if (window.speechSynthesis) window.speechSynthesis.cancel();
+      window.speechSynthesis.removeEventListener("voiceschanged", loadVoices);
+      sessionRef.current++;
+      window.speechSynthesis.cancel();
     };
   }, []);
+
+  const stopSpeech = () => {
+    speechSessionRef.current++;
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+  };
+
+  // Browsers go silent on long utterances, so speak the text in short chunks sequentially
+  const speakText = (text: string, rate: number, preset: typeof voices[0], onDone?: () => void) => {
+    const synth = window.speechSynthesis;
+    if (!synth) return;
+    stopSpeech();
+    const session = speechSessionRef.current;
+    const chunks = splitIntoChunks(text);
+    const voicesList = availableVoicesRef.current.length ? availableVoicesRef.current : synth.getVoices();
+    const matchedVoice = getMatchingVoice(preset, voicesList);
+    let index = 0;
+
+    const speakNext = () => {
+      if (session !== speechSessionRef.current) return;
+      if (index >= chunks.length) {
+        onDone?.();
+        return;
+      }
+      const utterance = new SpeechSynthesisUtterance(chunks[index++]);
+      utterance.rate = rate;
+      if (matchedVoice) {
+        utterance.voice = matchedVoice;
+        utterance.lang = matchedVoice.lang;
+      }
+      utterance.onend = speakNext;
+      utterance.onerror = (e) => {
+        if (e.error === "interrupted" || e.error === "canceled") return;
+        speakNext();
+      };
+      synth.resume();
+      synth.speak(utterance);
+    };
+
+    // Chrome can drop a speak() issued immediately after cancel()
+    setTimeout(speakNext, 100);
+  };
+
+  const applyImportedScript = (text: string) => {
+    stopSpeech();
+    setScriptText(text.trim());
+    setIsGenerated(false);
+    setIsPlaying(false);
+    setProgress(0);
+  };
+
+  const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (file.size > 1024 * 1024) {
+      alert("File is too large. Please choose a file under 1 MB.");
+      return;
+    }
+    const text = await file.text();
+    if (!text.trim()) {
+      alert("The selected file is empty.");
+      return;
+    }
+    applyImportedScript(scriptFromText(text));
+  };
+
+  const openLessonModal = async () => {
+    setIsImportMenuOpen(false);
+    setIsLessonModalOpen(true);
+    setIsLoadingLessons(true);
+    const res = await getLessonsAction();
+    setIsLoadingLessons(false);
+    if (res.success && res.lessons) {
+      setLessons(res.lessons);
+    } else {
+      alert(res.error || "Failed to load lessons");
+    }
+  };
+
+  const handleImportLesson = (lesson: LessonListItem) => {
+    if (!lesson.script) {
+      alert("This lesson has no script to import.");
+      return;
+    }
+    applyImportedScript(scriptFromText(lesson.script));
+    setIsLessonModalOpen(false);
+  };
 
   const handleImproveScript = () => {
     setIsImproving(true);
@@ -121,8 +287,8 @@ export default function VoiceStudioPage() {
     setIsGenerated(false);
     setProgress(0);
     setIsPlaying(false);
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
-    
+    stopSpeech();
+
     setTimeout(() => {
       setIsGenerating(false);
       setIsGenerated(true);
@@ -131,31 +297,16 @@ export default function VoiceStudioPage() {
 
   const togglePlay = () => {
     if (!isGenerated) return;
-    
+
     if (isPlaying) {
-      window.speechSynthesis.cancel();
+      stopSpeech();
       setIsPlaying(false);
     } else {
-      if (progress >= 100) setProgress(0);
-      
-      const utterance = new SpeechSynthesisUtterance(scriptText);
-      utterance.rate = parseFloat(speed);
-      
-      const availableVoices = window.speechSynthesis.getVoices();
-      const preset = voices[selectedVoice % voices.length];
-      const matchedVoice = getMatchingVoice(preset, availableVoices);
-      
-      if (matchedVoice) {
-        utterance.voice = matchedVoice;
-      }
-      
-      utterance.onend = () => {
+      setProgress(0);
+      speakText(scriptText, parseFloat(speed), voices[selectedVoice % voices.length], () => {
         setIsPlaying(false);
         setProgress(100);
-      };
-      utterance.onerror = () => setIsPlaying(false);
-      
-      window.speechSynthesis.speak(utterance);
+      });
       setIsPlaying(true);
     }
   };
@@ -195,17 +346,9 @@ export default function VoiceStudioPage() {
   };
   
   const playSavedVoice = (voice: SavedVoice) => {
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(voice.script_text);
-    utterance.rate = voice.speed;
-    const availableVoices = window.speechSynthesis.getVoices();
+    setIsPlaying(false);
     const preset = voices.find(v => voice.voice_preset.includes(v.name)) || voices[0];
-    const matchedVoice = getMatchingVoice(preset, availableVoices);
-    
-    if (matchedVoice) {
-      utterance.voice = matchedVoice;
-    }
-    window.speechSynthesis.speak(utterance);
+    speakText(voice.script_text, voice.speed, preset);
   };
 
   return (
@@ -297,16 +440,59 @@ export default function VoiceStudioPage() {
           <div className="flex-1 backdrop-blur-xl bg-background/40 border border-border/50 rounded-3xl p-6 shadow-2xl relative overflow-hidden min-h-[500px] flex flex-col">
             <div className="absolute top-1/2 right-0 w-96 h-96 bg-violet-500/5 rounded-full blur-3xl pointer-events-none -translate-y-1/2"></div>
             
-            <div className="flex justify-between items-center mb-6 relative z-10 border-b border-border/50 pb-4">
+            <div className="flex justify-between items-center mb-6 relative z-20 border-b border-border/50 pb-4">
               <h2 className="text-xl font-bold">Script Editor</h2>
-              <button 
-                onClick={handleImproveScript}
-                disabled={isImproving || scriptText.trim() === ""}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-lg font-medium transition-all bg-secondary text-secondary-foreground hover:bg-secondary/80 disabled:opacity-50 text-sm"
-              >
-                {isImproving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
-                {isImproving ? "Improving..." : "Improve with AI"}
-              </button>
+              <div className="flex items-center gap-2">
+                <div className="relative">
+                  <button
+                    onClick={() => setIsImportMenuOpen(o => !o)}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg font-medium transition-all bg-secondary text-secondary-foreground hover:bg-secondary/80 text-sm"
+                  >
+                    <Upload className="w-4 h-4" />
+                    Import
+                    <ChevronDown className="w-3 h-3" />
+                  </button>
+                  {isImportMenuOpen && (
+                    <>
+                      <div className="fixed inset-0 z-20" onClick={() => setIsImportMenuOpen(false)} />
+                      <div className="absolute right-0 mt-2 w-56 p-1 bg-background text-foreground border border-border rounded-xl shadow-2xl z-30 overflow-hidden">
+                        <button
+                          onClick={() => {
+                            setIsImportMenuOpen(false);
+                            fileInputRef.current?.click();
+                          }}
+                          className="w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium text-foreground hover:bg-violet-500/15 transition-colors text-left"
+                        >
+                          <HardDrive className="w-4 h-4 text-violet-400" />
+                          From Device
+                        </button>
+                        <button
+                          onClick={openLessonModal}
+                          className="w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium text-foreground hover:bg-violet-500/15 transition-colors text-left"
+                        >
+                          <BookOpen className="w-4 h-4 text-violet-400" />
+                          From Generated Lessons
+                        </button>
+                      </div>
+                    </>
+                  )}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".txt,.md,.json,text/plain,text/markdown,application/json"
+                    onChange={handleFileImport}
+                    className="hidden"
+                  />
+                </div>
+                <button
+                  onClick={handleImproveScript}
+                  disabled={isImproving || scriptText.trim() === ""}
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg font-medium transition-all bg-secondary text-secondary-foreground hover:bg-secondary/80 disabled:opacity-50 text-sm"
+                >
+                  {isImproving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+                  {isImproving ? "Improving..." : "Improve with AI"}
+                </button>
+              </div>
             </div>
 
             <textarea 
@@ -459,6 +645,48 @@ export default function VoiceStudioPage() {
                 {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                 Save to Media Library
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Lesson Import Modal */}
+      {isLessonModalOpen && (
+        <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-background text-foreground border border-border rounded-2xl shadow-2xl w-full max-w-lg p-6 relative max-h-[80vh] flex flex-col">
+            <button onClick={() => setIsLessonModalOpen(false)} className="absolute top-4 right-4 text-muted-foreground hover:text-foreground">
+              <X className="w-5 h-5" />
+            </button>
+            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+              <BookOpen className="w-5 h-5 text-violet-400" />
+              Import a Lesson
+            </h3>
+            <div className="overflow-y-auto flex-1 pr-2 custom-scrollbar space-y-2">
+              {isLoadingLessons ? (
+                <div className="flex justify-center py-10">
+                  <Loader2 className="w-6 h-6 animate-spin text-violet-500" />
+                </div>
+              ) : lessons.length === 0 ? (
+                <div className="text-center py-10 text-muted-foreground text-sm">
+                  <p className="mb-3">You don&apos;t have any saved lessons yet.</p>
+                  <Link href="/dashboard/lesson-generator" className="text-violet-500 font-medium hover:underline">
+                    Generate a lesson
+                  </Link>
+                </div>
+              ) : (
+                lessons.map(lesson => (
+                  <button
+                    key={lesson.id}
+                    onClick={() => handleImportLesson(lesson)}
+                    className="w-full text-left p-4 rounded-xl border border-border/50 bg-background/50 hover:bg-violet-500/10 hover:border-violet-500/50 transition-all"
+                  >
+                    <p className="font-semibold truncate">{lesson.title}</p>
+                    <p className="text-xs text-muted-foreground truncate">
+                      {lesson.topic ? `${lesson.topic} • ` : ""}{new Date(lesson.created_at).toLocaleDateString()}
+                    </p>
+                  </button>
+                ))
+              )}
             </div>
           </div>
         </div>

@@ -121,6 +121,33 @@ export async function getLessonByIdAction(id: string) {
   }
 }
 
+export async function getLessonsAction() {
+  try {
+    const { data: { user }, error: authError } = await getCustomUser();
+    if (authError || !user) {
+      return { success: false, error: "Unauthorized." };
+    }
+
+    const supabase = await createClient();
+    const { data, error } = await supabase
+      .from("content")
+      .select("id, title, topic, script, created_at")
+      .eq("user_id", user.id)
+      .eq("content_type", "lesson")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.error("Fetch Lessons Error:", error);
+      return { success: false, error: "Failed to fetch lessons." };
+    }
+
+    return { success: true, lessons: data ?? [] };
+  } catch (error: unknown) {
+    console.error("Get Lessons Action Error:", error);
+    return { success: false, error: "An unexpected error occurred." };
+  }
+}
+
 export async function deleteLessonAction(id: string) {
   try {
     const { data: { user }, error: authError } = await getCustomUser();

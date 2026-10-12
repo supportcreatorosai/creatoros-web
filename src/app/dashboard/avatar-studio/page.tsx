@@ -1,21 +1,36 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { User, Video, Sparkles, Settings2, PlaySquare, Maximize2, Loader2, Pause, Mic, Upload, X, Save, Download } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { User, Video, Sparkles, Settings2, PlaySquare, Maximize2, Loader2, Pause, Mic, Upload, X, Save, Download, ImagePlus } from "lucide-react";
 import Image from "next/image";
 import { getSavedVoicesAction, SavedVoice } from "@/app/actions/voice-actions";
-import { generateVideoAction, checkVideoStatusAction, saveVideoAction } from "@/app/actions/video-actions";
+import { generateVideoAction, checkVideoStatusAction, saveVideoAction, uploadAvatarImageAction, uploadAudioAction } from "@/app/actions/video-actions";
 import { useRouter } from "next/navigation";
 
-const avatars = [
+type Avatar = {
+  id: number | string;
+  name: string;
+  src: string;
+  // URL D-ID can read directly, set for imported avatars
+  remoteUrl?: string;
+};
+
+const avatars: Avatar[] = [
   { id: 1, name: "Tech Creator", src: "/avatars/avatar1.jpg" },
   { id: 2, name: "Professional", src: "/avatars/avatar2.jpg" },
   { id: 3, name: "AI Assistant", src: "/avatars/avatar3.jpg" },
 ];
 
+const MAX_AVATAR_SIZE = 10 * 1024 * 1024;
+
 export default function AvatarStudioPage() {
   const router = useRouter();
-  const [selectedAvatar, setSelectedAvatar] = useState(avatars[0]);
+  const [selectedAvatar, setSelectedAvatar] = useState<Avatar>(avatars[0]);
+
+  // Imported avatar states
+  const [customAvatar, setCustomAvatar] = useState<Avatar | null>(null);
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
+  const avatarInputRef = useRef<HTMLInputElement>(null);
   const [bgStyle, setBgStyle] = useState("Transparent (Green Screen)");
   
   const [isGenerating, setIsGenerating] = useState(false);
@@ -61,6 +76,55 @@ export default function AvatarStudioPage() {
     return () => clearInterval(interval);
   }, [isPlaying]);
 
+  // Release the preview blob URL when the imported avatar changes or the page unmounts
+  useEffect(() => {
+    return () => {
+      if (customAvatar) URL.revokeObjectURL(customAvatar.src);
+    };
+  }, [customAvatar]);
+
+  const handleAvatarImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+
+    if (!["image/jpeg", "image/png"].includes(file.type)) {
+      alert("Please choose a JPG or PNG image.");
+      return;
+    }
+    if (file.size > MAX_AVATAR_SIZE) {
+      alert("Image must be smaller than 10 MB.");
+      return;
+    }
+
+    setIsUploadingAvatar(true);
+    const formData = new FormData();
+    formData.append("image", file);
+    const res = await uploadAvatarImageAction(formData);
+    setIsUploadingAvatar(false);
+
+    if (!res.success || !res.url) {
+      alert(res.error || "Failed to upload avatar");
+      return;
+    }
+
+    const imported: Avatar = {
+      id: "custom",
+      name: "My Avatar",
+      src: URL.createObjectURL(file),
+      remoteUrl: res.url,
+    };
+    setCustomAvatar(imported);
+    setSelectedAvatar(imported);
+    setGeneratedVideoUrl(null);
+    setIsGenerated(false);
+  };
+
+  const removeCustomAvatar = () => {
+    if (selectedAvatar.id === "custom") setSelectedAvatar(avatars[0]);
+    setCustomAvatar(null);
+  };
+
   const handleGenerate = async () => {
     if (!selectedSavedVoice && !uploadedFile) return;
 
@@ -72,23 +136,44 @@ export default function AvatarStudioPage() {
     setVideoStatusText("Starting video generation...");
 
     try {
-      let scriptText = "Hello, this is a placeholder script. Please use Voice Studio scripts for best results.";
-      if (selectedSavedVoice) {
-        scriptText = selectedSavedVoice.script_text;
-      } else if (uploadedFile) {
-        alert("Audio file uploads to D-ID require a public bucket URL. Using a fallback text script for demonstration.");
+      let videoInput: string | { scriptText?: string; audioUrl?: string };
+
+      if (uploadedFile) {
+        setVideoStatusText("Uploading audio to D-ID...");
+        const audioFormData = new FormData();
+        audioFormData.append("audio", uploadedFile);
+        const uploadRes = await uploadAudioAction(audioFormData);
+
+        if (!uploadRes.success || !uploadRes.url) {
+          alert("Audio upload failed: " + (uploadRes.error || "Unknown error"));
+          setIsGenerating(false);
+          setVideoStatusText(null);
+          return;
+        }
+
+        videoInput = { audioUrl: uploadRes.url };
+      } else if (selectedSavedVoice) {
+        videoInput = { scriptText: selectedSavedVoice.script_text };
+      } else {
+        alert("Please select a voice or upload an audio file.");
+        setIsGenerating(false);
+        setVideoStatusText(null);
+        return;
       }
 
-      // D-ID requires a public URL. We construct it using the current origin.
-      let publicAvatarUrl = `${window.location.origin}${selectedAvatar.src}`;
-      
-      // If we are on localhost, D-ID's servers cannot download the image. 
+      setVideoStatusText("Starting video generation...");
+
+      // D-ID requires a public URL. Imported avatars are already uploaded to D-ID;
+      // preset avatars are served from the current origin.
+      let publicAvatarUrl = selectedAvatar.remoteUrl ?? `${window.location.origin}${selectedAvatar.src}`;
+
+      // If we are on localhost, D-ID's servers cannot download preset images.
       // We fall back to a known public D-ID placeholder image to avoid validation failures.
-      if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+      if (!selectedAvatar.remoteUrl && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
         publicAvatarUrl = "https://d-id-public-bucket.s3.us-west-2.amazonaws.com/alice.jpg";
       }
 
-      const res = await generateVideoAction(scriptText, publicAvatarUrl);
+      const res = await generateVideoAction(videoInput, publicAvatarUrl);
       
       if (!res.success || !res.id) {
         alert("Error starting generation: " + res.error);
@@ -247,11 +332,12 @@ export default function AvatarStudioPage() {
                       )}
                     </>
                   ) : (
-                    <Image 
-                      src={selectedAvatar.src} 
-                      alt={selectedAvatar.name} 
-                      fill 
+                    <Image
+                      src={selectedAvatar.src}
+                      alt={selectedAvatar.name}
+                      fill
                       sizes="250px"
+                      unoptimized={selectedAvatar.src.startsWith("blob:")}
                       className="object-cover"
                     />
                   )}
@@ -322,17 +408,52 @@ export default function AvatarStudioPage() {
             <div>
               <label className="block text-sm font-medium mb-3 flex justify-between">
                 <span>Select Avatar</span>
+                <span className="text-xs text-muted-foreground">JPG/PNG, front-facing</span>
               </label>
               <div className="grid grid-cols-3 gap-3">
-                {avatars.map((avatar) => (
-                  <div 
-                    key={avatar.id} 
+                {[...avatars, ...(customAvatar ? [customAvatar] : [])].map((avatar) => (
+                  <div
+                    key={avatar.id}
                     onClick={() => setSelectedAvatar(avatar)}
-                    className={`aspect-square rounded-xl border-2 cursor-pointer transition-all flex flex-col items-center justify-center overflow-hidden relative shadow-md hover:scale-105 ${selectedAvatar.id === avatar.id ? 'border-fuchsia-500 ring-2 ring-fuchsia-500/30' : 'border-border/50 hover:border-fuchsia-500/50'}`}
+                    className={`group aspect-square rounded-xl border-2 cursor-pointer transition-all flex flex-col items-center justify-center overflow-hidden relative shadow-md hover:scale-105 ${selectedAvatar.id === avatar.id ? 'border-fuchsia-500 ring-2 ring-fuchsia-500/30' : 'border-border/50 hover:border-fuchsia-500/50'}`}
                   >
-                    <Image src={avatar.src} alt={avatar.name} fill sizes="(max-width: 768px) 33vw, 150px" className="object-cover" />
+                    <Image
+                      src={avatar.src}
+                      alt={avatar.name}
+                      fill
+                      sizes="(max-width: 768px) 33vw, 150px"
+                      unoptimized={avatar.src.startsWith("blob:")}
+                      className="object-cover"
+                    />
+                    {avatar.id === "custom" && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeCustomAvatar();
+                        }}
+                        aria-label="Remove imported avatar"
+                        className="absolute top-1 right-1 z-10 p-1 rounded-full bg-black/60 text-white hover:bg-black/80 transition-colors"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    )}
                   </div>
                 ))}
+                <button
+                  onClick={() => avatarInputRef.current?.click()}
+                  disabled={isUploadingAvatar || isGenerating}
+                  className="aspect-square rounded-xl border-2 border-dashed border-border/70 bg-background/50 hover:bg-fuchsia-500/10 hover:border-fuchsia-500/50 transition-colors flex flex-col items-center justify-center gap-1.5 text-muted-foreground hover:text-fuchsia-400 disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {isUploadingAvatar ? <Loader2 className="w-5 h-5 animate-spin" /> : <ImagePlus className="w-5 h-5" />}
+                  <span className="text-xs font-semibold">{isUploadingAvatar ? "Uploading..." : customAvatar ? "Replace" : "Import"}</span>
+                </button>
+                <input
+                  ref={avatarInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png"
+                  onChange={handleAvatarImport}
+                  className="hidden"
+                />
               </div>
             </div>
 
@@ -371,11 +492,16 @@ export default function AvatarStudioPage() {
                   <label className="bg-background/50 border border-dashed border-border/70 rounded-xl p-4 text-center cursor-pointer hover:bg-fuchsia-500/10 hover:border-fuchsia-500/50 transition-colors flex flex-col items-center justify-center gap-2 group h-28">
                     <input 
                       type="file" 
-                      accept="audio/*" 
+                      accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg" 
                       className="hidden" 
                       onChange={(e) => {
                         if (e.target.files && e.target.files[0]) {
-                          setUploadedFile(e.target.files[0]);
+                          const file = e.target.files[0];
+                          if (file.size > 6 * 1024 * 1024) {
+                            alert("Audio file must be smaller than 6 MB (D-ID API limit).");
+                            return;
+                          }
+                          setUploadedFile(file);
                           setSelectedSavedVoice(null);
                         }
                       }}

@@ -13,11 +13,42 @@ export type SavedVideo = {
   created_at: string;
 };
 
-export async function generateVideoAction(text: string, avatarUrl?: string) {
+export type VideoGenerationInput = 
+  | string 
+  | { scriptText?: string; audioUrl?: string };
+
+export async function generateVideoAction(input: VideoGenerationInput, avatarUrl?: string) {
   try {
     const apiKey = process.env.D_ID_API_KEY;
     if (!apiKey) {
       return { success: false, error: "D-ID API key is not configured." };
+    }
+
+    let script: Record<string, unknown>;
+
+    if (typeof input === "string") {
+      script = {
+        type: 'text',
+        input,
+        provider: {
+          type: 'microsoft',
+          voice_id: 'en-US-JennyNeural',
+        },
+      };
+    } else if (input.audioUrl) {
+      script = {
+        type: 'audio',
+        audio_url: input.audioUrl,
+      };
+    } else {
+      script = {
+        type: 'text',
+        input: input.scriptText || "Hello, this is a placeholder script. Please use Voice Studio scripts for best results.",
+        provider: {
+          type: 'microsoft',
+          voice_id: 'en-US-JennyNeural',
+        },
+      };
     }
 
     // The D-ID API key is already in the format username:password or a base64 token.
@@ -29,14 +60,7 @@ export async function generateVideoAction(text: string, avatarUrl?: string) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        script: {
-          type: 'text',
-          input: text,
-          provider: {
-            type: 'microsoft',
-            voice_id: 'en-US-JennyNeural',
-          },
-        },
+        script,
         config: {
           stitch: true,
           result_format: 'mp4'
@@ -55,6 +79,104 @@ export async function generateVideoAction(text: string, avatarUrl?: string) {
   } catch (error) {
     console.error("Video Generation Error:", error);
     return { success: false, error: "An unexpected error occurred." };
+  }
+}
+
+const MAX_AUDIO_SIZE = 6 * 1024 * 1024; // 6 MB limit according to D-ID API specifications
+
+// Uploads an audio file directly to D-ID temporary storage so it can be passed as audio_url
+export async function uploadAudioAction(formData: FormData) {
+  try {
+    const { data: { user }, error: authError } = await getCustomUser();
+    if (authError || !user) {
+      return { success: false, error: "Unauthorized." };
+    }
+
+    const apiKey = process.env.D_ID_API_KEY;
+    if (!apiKey) {
+      return { success: false, error: "D-ID API key is not configured." };
+    }
+
+    const file = formData.get("audio");
+    if (!(file instanceof File) || file.size === 0) {
+      return { success: false, error: "No audio file provided." };
+    }
+    if (file.size > MAX_AUDIO_SIZE) {
+      return { success: false, error: "Audio file must be smaller than 6 MB." };
+    }
+
+    const body = new FormData();
+    body.append("audio", file, file.name);
+
+    const response = await fetch("https://api.d-id.com/audios", {
+      method: "POST",
+      headers: {
+        "Authorization": `Basic ${apiKey}`,
+      },
+      body,
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || !data.url) {
+      return { success: false, error: data.message || data.description || "Failed to upload audio file to D-ID." };
+    }
+
+    return { success: true, url: data.url as string };
+  } catch (error) {
+    console.error("Audio Upload Error:", error);
+    return { success: false, error: "An unexpected error occurred while uploading audio." };
+  }
+}
+
+const ALLOWED_AVATAR_TYPES = ["image/jpeg", "image/png"];
+const MAX_AVATAR_SIZE = 10 * 1024 * 1024;
+
+// Uploads a custom avatar image to D-ID so it can be used as a video source_url
+export async function uploadAvatarImageAction(formData: FormData) {
+  try {
+    const { data: { user }, error: authError } = await getCustomUser();
+    if (authError || !user) {
+      return { success: false, error: "Unauthorized." };
+    }
+
+    const apiKey = process.env.D_ID_API_KEY;
+    if (!apiKey) {
+      return { success: false, error: "D-ID API key is not configured." };
+    }
+
+    const file = formData.get("image");
+    if (!(file instanceof File) || file.size === 0) {
+      return { success: false, error: "No image provided." };
+    }
+    if (!ALLOWED_AVATAR_TYPES.includes(file.type)) {
+      return { success: false, error: "Only JPG and PNG images are supported." };
+    }
+    if (file.size > MAX_AVATAR_SIZE) {
+      return { success: false, error: "Image must be smaller than 10 MB." };
+    }
+
+    const body = new FormData();
+    body.append("image", file, file.name);
+
+    const response = await fetch("https://api.d-id.com/images", {
+      method: "POST",
+      headers: {
+        "Authorization": `Basic ${apiKey}`,
+      },
+      body,
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || !data.url) {
+      return { success: false, error: data.message || data.description || "Failed to upload avatar image." };
+    }
+
+    return { success: true, url: data.url as string };
+  } catch (error) {
+    console.error("Avatar Upload Error:", error);
+    return { success: false, error: "An unexpected error occurred while uploading the avatar." };
   }
 }
 
