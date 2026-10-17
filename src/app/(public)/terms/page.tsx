@@ -1,37 +1,26 @@
+import Link from "next/link"
+
+const sections = [
+  ["Using CreatorOS", "CreatorOS provides tools for creating and managing content. Creating an account requires acceptance of these terms. You are responsible for keeping your sign-in details secure, providing accurate account information, and using only accounts and connected services you are authorized to access."],
+  ["Your content and permissions", "You retain the rights you hold in the content you upload. You allow the service and the providers used for your requested features to process that content to deliver those features. Upload only material you have permission to use, including any personal data, images, voices, and likenesses. Do not assume generated output is exclusive, copyrightable, or cleared for third-party rights; review the rights needed before publishing."],
+  ["Responsible use", "Do not use CreatorOS for unlawful activity, harassment, fraud, impersonation, non-consensual voice or likeness cloning, or infringement of another person's rights. Do not bypass access controls, try to obtain another user's data, misuse credentials, or disrupt the service. Obtain any permissions needed for recordings and connected publishing accounts."],
+  ["Review AI output", "AI output may contain errors, bias, or misleading material. You are responsible for checking facts, suitability, permissions, and platform rules before sharing it. Educational, health, legal, and financial content needs appropriate review. The service does not promise that generated material is accurate or that a particular result will be achieved."],
+  ["Third-party services and privacy", "Some features rely on external AI, storage, authentication, or publishing services. Their availability and applicable terms may affect those features. Do not upload sensitive or confidential information unless you have permission and have assessed the relevant processing. See the Privacy Policy for information about how account and content data are handled."],
+  ["Plans, usage, and availability", "Use only the features and usage limits made available to your account. If a feature requires payment, review the price and any applicable billing or cancellation terms before confirming it. A displayed integration or planned feature does not guarantee its availability. Keep copies of important work; interruptions, failed generation, or unavailable providers can occur."],
+  ["Accounts and changes", "Access may be limited when necessary to address misuse, protect users, or maintain the service. Contact the operator through the Contact page about account problems or deletion requests. These terms may be revised; the published version and date identify the current text. Review any new version before accepting it."],
+  ["Your legal rights", "These terms do not exclude rights or remedies that applicable law does not allow to be excluded. Any additional contractual details needed for a paid offering should be provided before purchase."],
+]
+
 export default function TermsOfServicePage() {
   return (
-    <div className="container py-24 md:py-32">
-      <div className="max-w-3xl mx-auto space-y-8">
+    <div className="container mx-auto px-6 py-16">
+      <article className="max-w-3xl mx-auto space-y-8">
         <h1 className="text-4xl font-bold tracking-tight">Terms of Service</h1>
-        <p className="text-muted-foreground">Last updated: {new Date().toLocaleDateString()}</p>
-        
-        <div className="prose dark:prose-invert max-w-none">
-          <h2>1. Agreement to Terms</h2>
-          <p>By accessing or using CreatorOS AI, you agree to be bound by these Terms of Service and all applicable laws and regulations. If you do not agree with any of these terms, you are prohibited from using or accessing this site.</p>
-
-          <h2>2. Use License</h2>
-          <p>Permission is granted to temporarily download one copy of the materials (information or software) on CreatorOS AI's website for personal, non-commercial transitory viewing only. This is the grant of a license, not a transfer of title, and under this license you may not:</p>
-          <ul>
-            <li>modify or copy the materials;</li>
-            <li>use the materials for any commercial purpose, or for any public display (commercial or non-commercial);</li>
-            <li>attempt to decompile or reverse engineer any software contained on CreatorOS AI's website;</li>
-            <li>remove any copyright or other proprietary notations from the materials; or</li>
-            <li>transfer the materials to another person or "mirror" the materials on any other server.</li>
-          </ul>
-
-          <h2>3. Disclaimer</h2>
-          <p>The materials on CreatorOS AI's website are provided on an 'as is' basis. CreatorOS AI makes no warranties, expressed or implied, and hereby disclaims and negates all other warranties including, without limitation, implied warranties or conditions of merchantability, fitness for a particular purpose, or non-infringement of intellectual property or other violation of rights.</p>
-
-          <h2>4. Limitations</h2>
-          <p>In no event shall CreatorOS AI or its suppliers be liable for any damages (including, without limitation, damages for loss of data or profit, or due to business interruption) arising out of the use or inability to use the materials on CreatorOS AI's website, even if CreatorOS AI or a CreatorOS AI authorized representative has been notified orally or in writing of the possibility of such damage.</p>
-
-          <h2>5. Revisions and Errata</h2>
-          <p>The materials appearing on CreatorOS AI's website could include technical, typographical, or photographic errors. CreatorOS AI does not warrant that any of the materials on its website are accurate, complete or current. CreatorOS AI may make changes to the materials contained on its website at any time without notice.</p>
-
-          <h2>6. Governing Law</h2>
-          <p>These terms and conditions are governed by and construed in accordance with the laws and you irrevocably submit to the exclusive jurisdiction of the courts in that State or location.</p>
-        </div>
-      </div>
+        <p className="text-muted-foreground">Version 2026-10-09 · Last updated: 9 October 2026</p>
+        <p className="text-muted-foreground">Read these terms before creating an account. If you do not accept them, do not register or use the account features.</p>
+        {sections.map(([title, text], index) => <section key={title} className="space-y-3"><h2 className="text-xl font-semibold">{index + 1}. {title}</h2><p className="text-muted-foreground leading-relaxed">{text}</p></section>)}
+        <p className="text-sm">Related information: <Link href="/privacy" className="text-primary underline">Privacy Policy</Link> · <Link href="/contact" className="text-primary underline">Contact</Link></p>
+      </article>
     </div>
-  );
+  )
 }

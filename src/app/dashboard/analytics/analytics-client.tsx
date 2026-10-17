@@ -1,9 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { BarChart3, TrendingUp, Video, Image as ImageIcon, MonitorPlay, FileText, ArrowUpRight, Activity } from "lucide-react";
+import { useState } from "react";
+import { BarChart3, TrendingUp, Video, Image as ImageIcon, MonitorPlay, Activity } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
-import { format, subDays, isAfter, parseISO } from "date-fns";
+import { format, subDays, startOfDay, parseISO } from "date-fns";
 
 type DataPoint = { id: string; created_at: string };
 
@@ -19,9 +19,9 @@ export default function AnalyticsClient({ initialData }: AnalyticsClientProps) {
   const [timeRange, setTimeRange] = useState(30);
 
   // Filter data based on timeRange
-  const cutoffDate = subDays(new Date(), timeRange);
+  const cutoffDate = startOfDay(subDays(new Date(), timeRange - 1));
   
-  const filterByDate = (arr: DataPoint[]) => arr.filter(item => isAfter(parseISO(item.created_at), cutoffDate));
+  const filterByDate = (arr: DataPoint[]) => arr.filter(item => parseISO(item.created_at) >= cutoffDate);
 
   const filteredVideos = filterByDate(initialData.videos);
   const filteredImages = filterByDate(initialData.images);
@@ -35,12 +35,12 @@ export default function AnalyticsClient({ initialData }: AnalyticsClientProps) {
   // Initialize last X days with 0
   for (let i = timeRange - 1; i >= 0; i--) {
     const d = subDays(new Date(), i);
-    chartDataMap[format(d, 'MMM d')] = 0;
+    chartDataMap[format(d, 'yyyy-MM-dd')] = 0;
   }
 
   const addToChart = (arr: DataPoint[]) => {
     arr.forEach(item => {
-      const dateStr = format(parseISO(item.created_at), 'MMM d');
+      const dateStr = format(parseISO(item.created_at), 'yyyy-MM-dd');
       if (chartDataMap[dateStr] !== undefined) {
         chartDataMap[dateStr]++;
       }
@@ -51,7 +51,7 @@ export default function AnalyticsClient({ initialData }: AnalyticsClientProps) {
   addToChart(filteredImages);
   addToChart(filteredUploads);
 
-  const chartData = Object.entries(chartDataMap).map(([name, views]) => ({ name, views }));
+  const chartData = Object.entries(chartDataMap).map(([day, count]) => ({ name: format(parseISO(day), 'MMM d'), count }));
 
   const pieData = [
     { name: 'Videos', value: filteredVideos.length },
@@ -70,7 +70,7 @@ export default function AnalyticsClient({ initialData }: AnalyticsClientProps) {
             Content Analytics
           </h1>
           <p className="text-muted-foreground mt-1 flex items-center gap-2">
-            Track your AI generation and upload activity over time.
+            Track saved videos, saved images, and YouTube uploads over time.
           </p>
         </div>
         
@@ -88,7 +88,7 @@ export default function AnalyticsClient({ initialData }: AnalyticsClientProps) {
 
       <div className="w-full max-w-7xl grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
         {[
-          { title: 'Total Generated', value: totalContent, icon: Activity, color: 'text-green-500' },
+          { title: 'Total Activity', value: totalContent, icon: Activity, color: 'text-green-500' },
           { title: 'AI Videos', value: filteredVideos.length, icon: Video, color: 'text-blue-500' },
           { title: 'AI Images', value: filteredImages.length, icon: ImageIcon, color: 'text-emerald-500' },
           { title: 'YouTube Uploads', value: filteredUploads.length, icon: MonitorPlay, color: 'text-red-500' }
@@ -135,7 +135,7 @@ export default function AnalyticsClient({ initialData }: AnalyticsClientProps) {
                   itemStyle={{ color: '#22c55e' }}
                   labelStyle={{ color: '#fff', marginBottom: '4px' }}
                 />
-                <Area type="monotone" dataKey="views" stroke="#22c55e" strokeWidth={3} fillOpacity={1} fill="url(#colorViews)" />
+              <Area type="monotone" dataKey="count" name="Saved media and uploads" stroke="#22c55e" strokeWidth={3} fillOpacity={1} fill="url(#colorViews)" />
               </AreaChart>
             </ResponsiveContainer>
           </div>

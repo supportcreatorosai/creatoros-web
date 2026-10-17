@@ -3,6 +3,9 @@
 import { useState, useRef, useEffect } from "react";
 import { Type, Upload, Settings2, Sparkles, Scissors, Play, Pause, Loader2, Save, X, Video } from "lucide-react";
 import { generateCaptionsAction, getMediaVideosAction, saveShortAction } from "@/app/actions/caption-actions";
+import { uploadCreatorMedia, discardCreatorMedia } from "@/lib/storage/client";
+import { MAX_MEDIA_BYTES } from "@/lib/storage/shared";
+import { renderCaptionedShort } from "@/lib/video/render-captions";
 
 type Caption = { word: string; start: number; end: number };
 
@@ -41,7 +44,7 @@ function audioBufferToWav(buffer: AudioBuffer) {
   setUint16(16);                                 // 16-bit 
 
   setUint32(0x61746164);                         // "data" - chunk
-  setUint32(length - pos - 4);                   // chunk length
+  setUint32(length - 44);                        // PCM data length
 
   for(let i = 0; i < buffer.numberOfChannels; i++)
     channels.push(buffer.getChannelData(i));
@@ -49,7 +52,7 @@ function audioBufferToWav(buffer: AudioBuffer) {
   while(pos < buffer.length) {
     for(let i = 0; i < numOfChan; i++) {
       let sample = Math.max(-1, Math.min(1, channels[i][pos]));
-      sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0;
+      sample = (sample < 0 ? sample * 32768 : sample * 32767) | 0;
       view.setInt16(offset, sample, true);
       offset += 2;
     }
@@ -73,13 +76,14 @@ export default function CaptionsPage() {
   const [isRendering, setIsRendering] = useState(false);
   
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [mediaVideos, setMediaVideos] = useState<any[]>([]);
+  const [mediaVideos, setMediaVideos] = useState<{ id: string; name: string; video_url: string }[]>([]);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // 15 seconds limit
   const MAX_DURATION = 15.0;
+  useEffect(() => () => { if (videoUrl?.startsWith("blob:")) URL.revokeObjectURL(videoUrl); }, [videoUrl]);
 
   useEffect(() => {
     if (isModalOpen && mediaVideos.length === 0) {
@@ -87,11 +91,12 @@ export default function CaptionsPage() {
         if (res.success && res.videos) setMediaVideos(res.videos);
       });
     }
-  }, [isModalOpen]);
+  }, [isModalOpen, mediaVideos.length]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      if (!["video/mp4", "video/webm"].includes(file.type) || file.size > MAX_MEDIA_BYTES) { alert("Choose an MP4 or WebM video up to 50 MB."); return; }
       const url = URL.createObjectURL(file);
       setVideoUrl(url);
       resetState();
@@ -135,8 +140,10 @@ export default function CaptionsPage() {
   };
 
   const extractAudio = async (url: string): Promise<string> => {
+    let audioContext: AudioContext | undefined;
     try {
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      if (!window.AudioContext || !window.OfflineAudioContext) throw new Error("This browser does not support audio extraction.");
+      audioContext = new window.AudioContext();
       
       let fetchUrl = url;
       if (url.startsWith('http') && !url.startsWith('blob:')) {
@@ -151,7 +158,7 @@ export default function CaptionsPage() {
       const arrayBuffer = await response.arrayBuffer();
       
       console.log("Decoding audio data...");
-      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer).catch(e => {
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer).catch(() => {
          throw new Error("Failed to decode audio. The video might not have an audio track or uses an unsupported codec.");
       });
       
@@ -160,7 +167,7 @@ export default function CaptionsPage() {
       if (extractDuration <= 0) throw new Error("Audio duration is 0.");
       
       const sampleRate = 16000;
-      const OfflineCtxClass = window.OfflineAudioContext || (window as any).webkitOfflineAudioContext;
+      const OfflineCtxClass = window.OfflineAudioContext;
       const offlineCtx = new OfflineCtxClass(
         1, // 1 channel (mono)
         sampleRate * extractDuration,
@@ -182,10 +189,10 @@ export default function CaptionsPage() {
         reader.onloadend = () => resolve(reader.result as string);
         reader.onerror = () => reject(new Error("Failed to convert audio Blob to base64."));
       });
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("Audio Extraction Error:", e);
-      throw new Error(`Extraction failed: ${e.message}`);
-    }
+      throw new Error(`Extraction failed: ${e instanceof Error ? e.message : "Unable to extract audio."}`);
+    } finally { if (audioContext) await audioContext.close(); }
   };
 
   const handleGenerate = async () => {
@@ -203,9 +210,9 @@ export default function CaptionsPage() {
       } else {
         alert(res.error || "Failed to generate captions.");
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(err);
-      alert(`Error: ${err.message}`);
+      alert(`Error: ${err instanceof Error ? err.message : "Unable to generate captions."}`);
     } finally {
       setIsGenerating(false);
     }
@@ -215,154 +222,52 @@ export default function CaptionsPage() {
     if (!videoUrl) return;
     setIsSaving(true);
     
-    const finalUrl = videoUrl;
-
-    const res = await saveShortAction({
-      title: "My Auto-Cut Short",
-      videoUrl: finalUrl,
-      scriptData: { captions, selectedStyle },
-      hashtags: hashtags.join(" "),
-    });
-
-    setIsSaving(false);
-    if (res.success) {
+    let storagePath: string | undefined;
+    let recordOutcomeUnknown = false;
+    try {
+      const blob = await renderShort();
+      storagePath = (await uploadCreatorMedia(blob)).storagePath;
+      recordOutcomeUnknown = true;
+      const res = await saveShortAction({
+        title: "My Captioned Short",
+        videoStoragePath: storagePath,
+        scriptData: { captions, selectedStyle, captionsBurned: true }, hashtags: hashtags.join(" "),
+      });
+      recordOutcomeUnknown = false;
+      if (!res.success) throw new Error(res.error || "Failed to save short.");
+      storagePath = undefined;
       alert("Saved successfully to Media Library!");
-    } else {
-      alert("Error saving: " + res.error);
-    }
+    } catch (error) {
+      if (storagePath && !recordOutcomeUnknown) await discardCreatorMedia(storagePath).catch(() => undefined);
+      if (!(error instanceof DOMException && error.name === 'AbortError')) alert(recordOutcomeUnknown ? 'Could not confirm the save. Check Media Library before saving again.' : error instanceof Error ? error.message : "Failed to save short.");
+    } finally { setIsSaving(false); }
+  };
+
+  const renderAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => renderAbort.current?.abort(), []);
+
+  const renderShort = async () => {
+    if (!videoUrl) throw new Error("Please select a video first.");
+    const controller = new AbortController();
+    renderAbort.current?.abort();
+    renderAbort.current = controller;
+    setIsRendering(true);
+    try {
+      return await renderCaptionedShort({ videoUrl, captions, style: selectedStyle, signal: controller.signal });
+    } finally { if (!controller.signal.aborted) setIsRendering(false); }
   };
 
   const burnAndDownloadVideo = async () => {
-    if (!videoUrl) return;
-    setIsRendering(true);
-
     try {
-      // Fetch video as blob first to avoid canvas CORS tainting during capture
-      let srcUrl = videoUrl;
-      if (videoUrl.startsWith('http') && !videoUrl.startsWith('blob:')) {
-         const res = await fetch(`/api/download?url=${encodeURIComponent(videoUrl)}`);
-         const blob = await res.blob();
-         srcUrl = URL.createObjectURL(blob);
-      }
-      
-      const renderVideo = document.createElement('video');
-      renderVideo.crossOrigin = "anonymous";
-      renderVideo.src = srcUrl;
-      renderVideo.muted = false;
-      renderVideo.playsInline = true;
-      await new Promise((r) => { renderVideo.onloadedmetadata = r; });
-
-      const width = renderVideo.videoWidth;
-      const height = renderVideo.videoHeight;
-      const durationToRecord = Math.min(renderVideo.duration, MAX_DURATION);
-
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error("Could not get 2d context");
-
-      const stream = canvas.captureStream(30);
-
-      // Get audio track
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const source = audioCtx.createMediaElementSource(renderVideo);
-      const dest = audioCtx.createMediaStreamDestination();
-      source.connect(dest);
-      source.connect(audioCtx.destination); // Play audio during render so user knows it's happening
-      
-      const audioTrack = dest.stream.getAudioTracks()[0];
-      if (audioTrack) stream.addTrack(audioTrack);
-
-      const recorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
-      const chunks: BlobPart[] = [];
-      recorder.ondataavailable = (e) => chunks.push(e.data);
-
-      recorder.onstop = () => {
-        const blob = new Blob(chunks, { type: 'video/webm' });
-        const downloadUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = downloadUrl;
-        a.download = 'captioned_video.webm';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(downloadUrl);
-        setIsRendering(false);
-      };
-
-      recorder.start();
-      renderVideo.play().catch(e => {
-        throw new Error("Failed to play video for rendering. " + e.message);
-      });
-
-      const renderFrame = () => {
-        if (renderVideo.ended || renderVideo.currentTime >= durationToRecord) {
-          recorder.stop();
-          renderVideo.pause();
-          return;
-        }
-
-        // Draw video frame
-        ctx.drawImage(renderVideo, 0, 0, width, height);
-
-        // Draw active caption
-        const time = renderVideo.currentTime;
-        const activeWord = captions.find(c => time >= c.start && time <= c.end)?.word;
-
-        if (activeWord) {
-           ctx.textAlign = "center";
-           ctx.textBaseline = "bottom";
-           
-           const fontSize = Math.floor(height * 0.08); 
-           let text = activeWord;
-           
-           if (selectedStyle === 'Alex H.') {
-             ctx.font = `900 ${fontSize}px sans-serif`;
-             text = text.toUpperCase();
-             ctx.fillStyle = "white";
-             ctx.shadowColor = "rgba(0,0,0,0.8)";
-             ctx.shadowBlur = 10;
-             ctx.shadowOffsetX = 4;
-             ctx.shadowOffsetY = 4;
-           } else if (selectedStyle === 'Minimal') {
-             ctx.font = `500 ${Math.floor(fontSize * 0.8)}px sans-serif`;
-             ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
-             ctx.shadowColor = "transparent";
-             ctx.shadowBlur = 0;
-           } else if (selectedStyle === 'Karaoke') {
-             ctx.font = `800 ${fontSize}px sans-serif`;
-             ctx.fillStyle = "#ec4899";
-             ctx.shadowColor = "rgba(0,0,0,0.8)";
-             ctx.shadowBlur = 5;
-           } else if (selectedStyle === 'Dynamic') {
-             ctx.font = `800 ${fontSize}px sans-serif`;
-             ctx.fillStyle = "#facc15";
-             ctx.shadowColor = "rgba(0,0,0,0.8)";
-             ctx.shadowBlur = 5;
-           }
-
-           const paddingBottom = Math.floor(height * 0.15);
-           
-           // Outline stroke for visibility
-           if (selectedStyle !== 'Minimal') {
-             ctx.strokeStyle = "black";
-             ctx.lineWidth = Math.floor(fontSize * 0.15);
-             ctx.strokeText(text, width / 2, height - paddingBottom);
-           }
-           
-           ctx.fillText(text, width / 2, height - paddingBottom);
-        }
-
-        requestAnimationFrame(renderFrame);
-      };
-
-      requestAnimationFrame(renderFrame);
-
-    } catch (e: any) {
-      console.error(e);
-      alert("Error rendering video: " + e.message);
-      setIsRendering(false);
+      const blob = await renderShort();
+      const downloadUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = downloadUrl;
+      anchor.download = blob.type === "video/mp4" ? "captioned_video.mp4" : "captioned_video.webm";
+      document.body.appendChild(anchor); anchor.click(); anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) alert(error instanceof Error ? error.message : "Video export failed.");
     }
   };
 
@@ -403,10 +308,10 @@ export default function CaptionsPage() {
                   <button onClick={() => setVideoUrl(null)} className="px-3 py-1.5 rounded-lg bg-secondary text-sm font-medium hover:bg-secondary/80">
                     Clear
                   </button>
-                  <button className="flex items-center gap-2 px-3 py-1.5 rounded-lg font-medium transition-all bg-pink-500/20 text-pink-500 text-sm">
+                  <span className="flex items-center gap-2 px-3 py-1.5 rounded-lg font-medium bg-pink-500/20 text-pink-500 text-sm">
                     <Scissors className="w-4 h-4" />
-                    Auto-Cut to 15s
-                  </button>
+                    First 15 seconds
+                  </span>
                 </div>
               )}
             </div>
@@ -540,20 +445,21 @@ export default function CaptionsPage() {
               <>
                 <button 
                   onClick={handleSave}
-                  disabled={isSaving}
+                  disabled={isSaving || isRendering || isGenerating}
                   className="w-full bg-secondary hover:bg-secondary/80 text-secondary-foreground font-semibold py-3 px-4 rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50"
                 >
                   {isSaving ? <Loader2 className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
-                  {isSaving ? "Saving..." : "Save to Media Library"}
+                  {isSaving ? "Saving..." : "Save captioned short"}
                 </button>
                 <button 
                   onClick={burnAndDownloadVideo}
-                  disabled={isRendering}
+                  disabled={isRendering || isSaving || isGenerating}
                   className="w-full border border-border hover:bg-muted text-foreground font-semibold py-3 px-4 rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50"
                 >
                   {isRendering ? <Loader2 className="w-5 h-5 animate-spin" /> : <Upload className="w-5 h-5 rotate-180" />}
-                  {isRendering ? "Rendering..." : "Download Video"}
+                  {isRendering ? "Rendering..." : "Download captioned short"}
                 </button>
+                <p className="text-xs text-muted-foreground">Save and download both render a captioned video of the first 15 seconds.</p>
               </>
             )}
           </div>

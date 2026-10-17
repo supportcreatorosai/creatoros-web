@@ -33,9 +33,9 @@ export default async function PublicLayout({
             {user ? (
               <>
                 <Link href="/dashboard" className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors hidden sm:inline-block">Dashboard</Link>
-                <a href="/auth/logout" className={buttonVariants({ variant: "outline", size: "sm", className: "font-medium rounded-md px-4 hidden sm:flex" })}>
-                  Logout
-                </a>
+                <form action="/auth/logout" method="post" className="hidden sm:block">
+                  <Button type="submit" variant="outline" size="sm">Logout</Button>
+                </form>
               </>
             ) : (
               <>

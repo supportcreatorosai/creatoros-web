@@ -1,112 +1,116 @@
 'use server'
 
 import { revalidatePath } from 'next/cache'
+import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
-import { z } from 'zod'
+import { canonicalSiteUrl, safeRedirectPath } from '@/lib/security/validation'
+import { emailSchema, loginSchema, registerSchema, verificationSchema, hasVerifiedEmail, TERMS_PENDING_COOKIE, TERMS_VERSION } from '@/lib/auth/validation'
+import { recordTermsAcceptance } from '@/lib/auth/terms'
+import { emailConfirmationEnabled } from '@/lib/auth/configuration'
 
-const registerSchema = z.object({
-  name: z.string().min(2, "Name must be at least 2 characters"),
-  email: z.string().email("Invalid email address"),
-  password: z.string().min(6, "Password must be at least 6 characters"),
-  confirmPassword: z.string()
-}).refine(data => data.password === data.confirmPassword, {
-  message: "Passwords do not match",
-  path: ["confirmPassword"]
-});
+function confirmationUrl(next: string) {
+  const url = new URL('/auth/callback', canonicalSiteUrl())
+  url.searchParams.set('next', next)
+  return url.toString()
+}
 
 export async function login(formData: FormData) {
+  const parsed = loginSchema.safeParse({ email: formData.get('email'), password: formData.get('password') })
+  if (!parsed.success) return { error: parsed.error.issues[0].message }
+  const next = safeRedirectPath(formData.get('redirectTo'))
   const supabase = await createClient()
-
-  const email = formData.get('email') as string
-  const password = formData.get('password') as string
-  const redirectTo = (formData.get('redirectTo') as string) || '/dashboard'
-
-  const { error } = await supabase.auth.signInWithPassword({
-    email,
-    password,
-  })
-
+  const { data, error } = await supabase.auth.signInWithPassword(parsed.data)
   if (error) {
-    return { error: 'Invalid credentials or user not found' }
+    if (error.code === 'email_not_confirmed') {
+      redirect(`/otp-verify?${new URLSearchParams({ email: parsed.data.email, redirectTo: next })}`)
+    }
+    return { error: 'Unable to sign in. Check your email and password.' }
   }
-
-  revalidatePath(redirectTo.startsWith('/dashboard') ? '/dashboard' : redirectTo, 'layout')
-  redirect(redirectTo)
+  if (!data.user || !hasVerifiedEmail(data.user)) {
+    await supabase.auth.signOut()
+    return { error: 'Confirm your email before signing in.' }
+  }
+  if (!(await recordTermsAcceptance(supabase, data.user))) {
+    await supabase.auth.signOut()
+    return { error: 'Unable to save your terms acceptance. Please try again later.' }
+  }
+  revalidatePath('/dashboard', 'layout')
+  redirect(next)
 }
 
 export async function signup(formData: FormData) {
-  const supabase = await createClient()
-
-  const data = {
-    name: formData.get('name') as string,
-    email: formData.get('email') as string,
-    password: formData.get('password') as string,
-    confirmPassword: formData.get('confirm-password') as string,
-  }
-  const redirectTo = (formData.get('redirectTo') as string) || '/dashboard'
-  
-  const parsed = registerSchema.safeParse(data);
-  if (!parsed.success) {
-    return { error: parsed.error.issues[0].message };
-  }
-
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-  const { error } = await supabase.auth.signUp({
-    email: parsed.data.email,
-    password: parsed.data.password,
-    options: {
-      data: {
-        full_name: parsed.data.name,
-        otp: otp,
-        otp_verified: false,
-        is_first_login: true
-      }
-    }
+  const parsed = registerSchema.safeParse({
+    name: formData.get('name'), email: formData.get('email'), password: formData.get('password'),
+    confirmPassword: formData.get('confirm-password'), terms: formData.get('terms') === 'true',
   })
-
-  if (error) {
-    return { error: error.message || 'Failed to create user' }
+  if (!parsed.success) return { error: parsed.error.issues[0].message }
+  if (!(await emailConfirmationEnabled())) return { error: 'Email registration is temporarily unavailable. Use Google sign-in or contact support.' }
+  const next = safeRedirectPath(formData.get('redirectTo'))
+  const supabase = await createClient()
+  const { data, error } = await supabase.auth.signUp({
+    email: parsed.data.email, password: parsed.data.password,
+    options: {
+      emailRedirectTo: confirmationUrl(next),
+      data: { full_name: parsed.data.name, terms_version: TERMS_VERSION, is_first_login: true },
+    },
+  })
+  if (error) return { error: 'Unable to create this account. Please try again later.' }
+  if (data.session && data.user && hasVerifiedEmail(data.user)) {
+    if (!(await recordTermsAcceptance(supabase, data.user))) {
+      await supabase.auth.signOut()
+      return { error: 'Unable to save your terms acceptance. Please try again later.' }
+    }
+    revalidatePath('/dashboard', 'layout')
+    redirect(next)
   }
+  redirect(`/otp-verify?${new URLSearchParams({ email: parsed.data.email, redirectTo: next })}`)
+}
 
-  // Redirect to OTP verification page instead of dashboard
-  redirect('/otp-verify');
+export async function loginWithGoogle(formData: FormData) {
+  if (formData.get('terms') !== 'true') return { error: 'Accept the Terms of Service before continuing with Google.' }
+  const next = safeRedirectPath(formData.get('redirectTo'))
+  const supabase = await createClient()
+  const { data, error } = await supabase.auth.signInWithOAuth({
+    provider: 'google', options: { redirectTo: confirmationUrl(next), skipBrowserRedirect: true, queryParams: { prompt: 'select_account' } },
+  })
+  if (error || !data.url) return { error: 'Google sign-in is unavailable. Please try email sign-in.' }
+  const cookieStore = await cookies()
+  cookieStore.set(TERMS_PENDING_COOKIE, TERMS_VERSION, {
+    httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/auth/callback', maxAge: 600,
+  })
+  redirect(data.url)
 }
 
 export async function logout() {
-  const supabase = await createClient();
-  await supabase.auth.signOut();
-  
-  redirect('/login');
+  const supabase = await createClient()
+  await supabase.auth.signOut()
+  revalidatePath('/', 'layout')
+  redirect('/login')
 }
 
-export async function verifyOTP(submittedOtp: string) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-
-  if (!user) {
-    return { error: 'Not authenticated' };
+export async function verifyOTP(formData: FormData) {
+  const parsed = verificationSchema.safeParse({ email: formData.get('email'), token: formData.get('token') })
+  if (!parsed.success) return { error: parsed.error.issues[0].message }
+  const supabase = await createClient()
+  const { data, error } = await supabase.auth.verifyOtp({ ...parsed.data, type: 'email' })
+  if (error || !data.user || !hasVerifiedEmail(data.user)) return { error: 'This code is invalid or expired. Request a new confirmation email.' }
+  if (!(await recordTermsAcceptance(supabase, data.user))) {
+    await supabase.auth.signOut()
+    return { error: 'Unable to save your terms acceptance. Please try again later.' }
   }
+  revalidatePath('/dashboard', 'layout')
+  redirect(safeRedirectPath(formData.get('redirectTo')))
+}
 
-  const expectedOtp = user.user_metadata?.otp;
-
-  if (!expectedOtp || submittedOtp !== expectedOtp) {
-    return { error: 'Invalid OTP code' };
-  }
-
-  // Update user metadata to verified
-  const { error } = await supabase.auth.updateUser({
-    data: {
-      otp_verified: true,
-      otp: null // Clear the OTP
-    }
-  });
-
-  if (error) {
-    return { error: error.message };
-  }
-
-  revalidatePath('/dashboard', 'layout');
-  redirect('/dashboard');
+export async function resendVerification(formData: FormData) {
+  const parsed = emailSchema.safeParse(formData.get('email'))
+  if (!parsed.success) return { error: parsed.error.issues[0].message }
+  const supabase = await createClient()
+  const { error } = await supabase.auth.resend({
+    type: 'signup', email: parsed.data,
+    options: { emailRedirectTo: confirmationUrl(safeRedirectPath(formData.get('redirectTo'))) },
+  })
+  if (error) return { error: 'Unable to resend right now. Wait a minute and try again.' }
+  return { success: 'If this account needs confirmation, a new email has been requested. Check your inbox and spam folder.' }
 }

@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import Link from "next/link";
 
 interface NavbarProps {
-  user: any;
+  user: { full_name?: string | null; email?: string | null } | null;
   isCollapsed: boolean;
   toggleCollapse: () => void;
 }
@@ -115,13 +115,12 @@ export function Navbar({ user, isCollapsed, toggleCollapse }: NavbarProps) {
                 <SettingsIcon className="h-4 w-4" />
                 Settings
               </Link>
-              <Link
-                href="/auth/logout"
-                className="flex w-full items-center gap-2 rounded-xl p-2.5 text-sm text-red-500 hover:bg-red-500/10 transition-colors font-medium"
+              <form action="/auth/logout" method="post"><button
+                type="submit" className="flex w-full items-center gap-2 rounded-xl p-2.5 text-sm text-red-500 hover:bg-red-500/10 transition-colors font-medium"
               >
                 <LogOut className="h-4 w-4" />
                 Sign Out
-              </Link>
+              </button></form>
             </div>
           </div>
         )}

@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import CalendarClient, { CalendarItem } from "./calendar-client";
+import { signMediaPath } from "@/lib/storage/server";
 
 export default async function CalendarPage() {
   const supabase = await createClient();
@@ -12,32 +13,33 @@ export default async function CalendarPage() {
 
   // Fetch data
   const [
-    { data: videos },
-    { data: images },
-    { data: youtubeUploads }
+    { data: videos, error: videoError },
+    { data: images, error: imageError },
+    { data: youtubeUploads, error: youtubeError }
   ] = await Promise.all([
-    supabase.from('saved_videos').select('id, name, video_url, created_at').eq('user_id', user.id),
-    supabase.from('saved_images').select('id, prompt, image_url, created_at').eq('user_id', user.id),
+    supabase.from('saved_videos').select('id, name, video_url, storage_path, created_at').eq('user_id', user.id),
+    supabase.from('saved_images').select('id, name, image_url, storage_path, created_at').eq('user_id', user.id),
     supabase.from('youtube_uploads').select('id, title, video_url, created_at').eq('user_id', user.id)
   ]);
+  if (videoError || imageError || youtubeError) return <p role="alert" className="p-8 text-destructive">Unable to load the calendar. Check database setup and try again.</p>;
 
   const items: CalendarItem[] = [];
 
-  videos?.forEach(v => items.push({
+  await Promise.all((videos || []).map(async v => items.push({
     id: v.id,
     title: v.name || "AI Generated Video",
     type: 'video',
     created_at: v.created_at,
-    url: v.video_url
-  }));
+    url: v.storage_path ? await signMediaPath(supabase, user.id, v.storage_path).catch(() => undefined) : v.video_url,
+  })));
 
-  images?.forEach(i => items.push({
+  await Promise.all((images || []).map(async i => items.push({
     id: i.id,
-    title: i.prompt || "AI Generated Image",
+    title: i.name || "AI Generated Image",
     type: 'image',
     created_at: i.created_at,
-    url: i.image_url
-  }));
+    url: i.storage_path ? await signMediaPath(supabase, user.id, i.storage_path).catch(() => undefined) : i.image_url,
+  })));
 
   youtubeUploads?.forEach(y => items.push({
     id: y.id,

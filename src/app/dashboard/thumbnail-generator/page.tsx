@@ -1,14 +1,14 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useRef } from "react";
+import NextImage from "next/image";
 import { Image as ImageIcon, Sparkles, Settings2, Download, RefreshCcw, Layers, Loader2, Maximize2, X, Save } from "lucide-react";
-import { useRouter } from "next/navigation";
 import { saveImageAction } from "@/app/actions/image-actions";
+import { uploadCreatorMedia, discardCreatorMedia } from "@/lib/storage/client";
 
 const styles = ['3D Render', 'Cinematic', 'Minimalist', 'Anime / 2D', 'MrBeast Style', 'Vlog'];
 
 export default function ThumbnailGeneratorPage() {
-  const router = useRouter();
   const [topic, setTopic] = useState("");
   const [selectedStyle, setSelectedStyle] = useState(0); 
   const [title, setTitle] = useState("");
@@ -139,26 +139,18 @@ export default function ThumbnailGeneratorPage() {
   };
 
   const handleDownload4k = async () => {
+    const selected = compositedImages[activeImageIndex];
+    if (!selected) return;
     setIsDownloading(true);
-    
-    const styleName = styles[selectedStyle];
-    const prompt = cleanPrompt(`${topic}, ${styleName} style, high quality, youtube thumbnail`);
-    const seed = Math.floor(Math.random() * 1000000);
-    const rawUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=3840&height=2160&nologo=true&seed=${seed}`;
-    const proxyUrl = `/api/download?url=${encodeURIComponent(rawUrl)}`;
-
     try {
-      const response = await fetch(proxyUrl);
-      if (!response.ok) throw new Error("Failed to fetch 4k image");
-      const blob = await response.blob();
-      const localBlobUrl = URL.createObjectURL(blob);
-      
-      // Calculate active variation properties
-      const hueRotate = activeImageIndex * 45;
-      const brightness = 1 + (activeImageIndex * 0.1);
-
-      const highResDataUrl = await compositeImage(localBlobUrl, true, hueRotate, brightness);
-      
+      const image = new Image();
+      await new Promise<void>((resolve, reject) => { image.onload = () => resolve(); image.onerror = () => reject(new Error("Unable to export selected image.")); image.src = selected; });
+      const canvas = document.createElement("canvas");
+      canvas.width = 3840; canvas.height = 2160;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Canvas is unavailable.");
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const highResDataUrl = canvas.toDataURL("image/jpeg", 0.95);
       const filename = `creatoros_thumbnail_4k_${new Date().getTime()}.jpg`;
       const a = document.createElement('a');
       a.href = highResDataUrl;
@@ -167,7 +159,6 @@ export default function ThumbnailGeneratorPage() {
       a.click();
       document.body.removeChild(a);
       
-      URL.revokeObjectURL(localBlobUrl);
     } catch (e) {
       console.error(e);
       alert("Failed to download 4K image.");
@@ -180,20 +171,19 @@ export default function ThumbnailGeneratorPage() {
     if (!compositedImages[activeImageIndex]) return;
     
     setIsSaving(true);
-    // Note: We are passing a Base64 data URL to the server action. 
-    // Supabase TEXT column can handle this, and Next.js body limit is configured.
-    const res = await saveImageAction({
-      name: title || topic || 'Thumbnail',
-      image_url: compositedImages[activeImageIndex],
-      style: styles[selectedStyle]
-    });
-    
-    setIsSaving(false);
-    if (res.success) {
+    let storagePath: string | undefined;
+    try {
+      const blob = await (await fetch(compositedImages[activeImageIndex])).blob();
+      const upload = await uploadCreatorMedia(blob);
+      storagePath = upload.storagePath;
+      const res = await saveImageAction({ name: title || topic || "Thumbnail", storage_path: storagePath, style: styles[selectedStyle] });
+      if (!res.success) throw new Error(res.error || "Failed to save image.");
+      storagePath = undefined;
       alert("Saved successfully!");
-    } else {
-      alert(res.error || "Failed to save image.");
-    }
+    } catch (error) {
+      if (storagePath) await discardCreatorMedia(storagePath);
+      alert(error instanceof Error ? error.message : "Failed to save image.");
+    } finally { setIsSaving(false); }
   };
 
   return (
@@ -306,7 +296,7 @@ export default function ThumbnailGeneratorPage() {
                   className="flex items-center gap-2 px-4 py-1.5 rounded-lg font-medium transition-all bg-blue-600 text-white hover:bg-blue-700 disabled:bg-blue-600/50 disabled:cursor-not-allowed text-sm"
                 >
                   {isDownloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                  {isDownloading ? "Generating 4K..." : "Download 4K"}
+                  {isDownloading ? "Exporting..." : "Export 4K (upscaled)"}
                 </button>
               </div>
             </div>
@@ -324,8 +314,7 @@ export default function ThumbnailGeneratorPage() {
               
               {isGenerated && compositedImages[activeImageIndex] && (
                 <>
-                  <img 
-                    src={compositedImages[activeImageIndex]} 
+                  <NextImage fill unoptimized sizes="(max-width: 1024px) 100vw, 70vw" src={compositedImages[activeImageIndex]}
                     alt="Generated Thumbnail" 
                     className="absolute inset-0 w-full h-full object-cover transition-all duration-700 opacity-100 group-hover:scale-105"
                   />
@@ -357,8 +346,7 @@ export default function ThumbnailGeneratorPage() {
                   className={`aspect-video rounded-xl bg-black/40 border flex items-center justify-center transition-all cursor-pointer relative overflow-hidden group ${activeImageIndex === i ? 'border-blue-500 ring-2 ring-blue-500/30' : 'border-border/50 hover:border-blue-500/50'}`}
                 >
                   {isGenerated && compositedImages[i] ? (
-                    <img 
-                      src={compositedImages[i]} 
+                    <NextImage fill unoptimized sizes="(max-width: 1024px) 100vw, 70vw" src={compositedImages[i]}
                       alt={`Variation ${i + 1}`} 
                       className={`absolute inset-0 w-full h-full object-cover transition-opacity ${activeImageIndex === i ? 'opacity-100' : 'opacity-60 group-hover:opacity-100'}`}
                     />
@@ -386,8 +374,7 @@ export default function ThumbnailGeneratorPage() {
               <X className="w-6 h-6" />
             </button>
             <div className="relative w-full aspect-video rounded-xl overflow-hidden shadow-2xl border border-white/20 bg-black/50">
-              <img 
-                src={compositedImages[activeImageIndex]} 
+              <NextImage fill unoptimized sizes="(max-width: 1024px) 100vw, 70vw" src={compositedImages[activeImageIndex]}
                 alt="Enlarged Thumbnail" 
                 className="absolute inset-0 w-full h-full object-contain"
               />
@@ -399,7 +386,7 @@ export default function ThumbnailGeneratorPage() {
                 className="flex items-center gap-2 px-6 py-3 rounded-xl font-bold transition-all bg-blue-600 text-white hover:bg-blue-700 shadow-lg shadow-blue-500/25 text-lg disabled:opacity-70"
               >
                 {isDownloading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Download className="w-5 h-5" />}
-                {isDownloading ? "Generating 4K..." : "Download High-Res 4K"}
+                {isDownloading ? "Exporting..." : "Export Selected Image at 4K (upscaled)"}
               </button>
             </div>
           </div>

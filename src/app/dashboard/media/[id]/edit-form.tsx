@@ -1,4 +1,5 @@
 'use client';
+import Image from "next/image";
 
 import { useActionState } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
@@ -174,7 +175,7 @@ export function EditContentForm({ id, content }: { id: string, content: { title:
                     <div className="space-y-2">
                       <Label>Thumbnail</Label>
                       <div className="rounded-md overflow-hidden border border-border/50 bg-muted">
-                        <img src={content.thumbnail_url} alt="Thumbnail" className="w-full h-auto object-cover" />
+                        <Image width={1280} height={720} unoptimized src={content.thumbnail_url} alt="Thumbnail" className="w-full h-auto object-cover" />
                       </div>
                     </div>
                   )}

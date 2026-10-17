@@ -1,9 +1,14 @@
 import { NextResponse } from 'next/server';
 import { getCustomUser } from '@/lib/auth/session';
 import { aiOrchestrator } from '@/lib/ai/orchestrator';
-import { AIRequestModel } from '@/lib/ai/types';
+import { AIRequestSchema } from '@/lib/ai/types';
+import { createClient } from '@/lib/supabase/server';
+import { enforceRateLimit, RateLimitError, RateLimitUnavailableError } from '@/lib/security/rate-limit';
+import { isSameOriginRequest } from '@/lib/security/validation';
+import { readJsonBody, RequestBodyError } from '@/lib/security/body';
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) return NextResponse.json({success:false,error:'Request origin is not permitted.'},{status:403});
   try {
     const { data: { user } } = await getCustomUser();
 
@@ -21,13 +26,14 @@ export async function POST(request: Request) {
       );
     }
 
-    const body = await request.json();
+    const body = await readJsonBody(request,50000);
+    const parsed = AIRequestSchema.safeParse(body);
 
-    if (!body.task || !body.prompt) {
+    if (!parsed.success) {
       return NextResponse.json(
         {
           success: false,
-          error: "Missing required fields 'task' or 'prompt'.",
+          error: "Invalid generation request. Check task, prompt, and generation limits.",
           errorCategory: "INVALID_REQUEST",
           provider: "unknown",
           model: "unknown",
@@ -37,19 +43,15 @@ export async function POST(request: Request) {
       );
     }
 
-    const aiRequest: AIRequestModel = {
-      task: body.task,
-      prompt: body.prompt,
-      systemPrompt: body.systemPrompt,
-      temperature: body.temperature,
-      maxTokens: body.maxTokens,
-      context: body.context
-    };
+    const supabase = await createClient();
+    await enforceRateLimit(supabase, "ai-generate", 20, 3600);
+    const response = await aiOrchestrator.generateRaw(parsed.data);
 
-    const response = await aiOrchestrator.generateRaw(aiRequest);
-
-    return NextResponse.json(response);
+    return NextResponse.json(response, { status: response.success ? 200 : response.errorCategory === "TIMEOUT" ? 504 : 503 });
   } catch (error) {
+    if (error instanceof RateLimitError || error instanceof RateLimitUnavailableError || error instanceof RequestBodyError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: error.status });
+    }
     console.error("[API /api/ai/generate] Unexpected Error:", error);
     return NextResponse.json(
       {

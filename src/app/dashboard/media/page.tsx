@@ -2,6 +2,8 @@ import { FolderHeart, Plus } from "lucide-react";
 import { createClient } from "@/lib/supabase/server";
 import { getCustomUser } from "@/lib/auth/session";
 import { MediaClient, Asset } from "./media-client";
+import Link from "next/link";
+import { signMediaPath } from "@/lib/storage/server";
 
 export default async function MediaPage({ searchParams }: { searchParams: Promise<{ [key: string]: string | string[] | undefined }> }) {
   const { data: { user } } = await getCustomUser();
@@ -13,32 +15,39 @@ export default async function MediaPage({ searchParams }: { searchParams: Promis
   const supabase = await createClient();
 
   // Fetch from content table (lessons)
-  const { data: contentData } = await supabase
+  const [contentResult, videosResult, voicesResult, imagesResult] = await Promise.all([
+    supabase
     .from("content")
     .select("id, title, content_type, created_at, script, description")
     .eq("user_id", user.id)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false }),
 
   // Fetch from saved_videos
-  const { data: videosData } = await supabase
+  supabase
     .from("saved_videos")
-    .select("id, name, created_at, video_url")
+    .select("id, name, created_at, video_url, storage_path")
     .eq("user_id", user.id)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false }),
 
   // Fetch from saved_voices
-  const { data: voicesData } = await supabase
+  supabase
     .from("saved_voices")
-    .select("id, name, created_at, script_text")
+    .select("id, name, created_at, script_text, storage_path")
     .eq("user_id", user.id)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false }),
 
   // Fetch from saved_images
-  const { data: imagesData } = await supabase
+  supabase
     .from("saved_images")
-    .select("id, name, created_at, image_url")
+    .select("id, name, created_at, image_url, storage_path")
     .eq("user_id", user.id)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false }),
+  ]);
+  if ([contentResult, videosResult, voicesResult, imagesResult].some(result => result.error)) throw new Error("Unable to load media. Check database setup and try again.");
+  const contentData = contentResult.data;
+  const videosData = videosResult.data;
+  const voicesData = voicesResult.data;
+  const imagesData = imagesResult.data;
 
   const assets: Asset[] = [];
 
@@ -47,7 +56,7 @@ export default async function MediaPage({ searchParams }: { searchParams: Promis
   };
 
   if (contentData) {
-    contentData.forEach(item => {
+    await Promise.all(contentData.map(async item => {
       if (item.content_type === 'lesson') {
         assets.push({
           id: item.id,
@@ -56,49 +65,62 @@ export default async function MediaPage({ searchParams }: { searchParams: Promis
           date: formatDate(item.created_at),
           script: item.script,
           description: item.description,
+          source: "content", createdAt: item.created_at,
         });
+      } else {
+        let url: string | undefined;
+        try {
+          const script = JSON.parse(item.script || "{}");
+          if (typeof script.video_storage_path === "string") url = await signMediaPath(supabase, user.id, script.video_storage_path).catch(() => undefined);
+          else if (typeof script.video_url === "string" && script.video_url.startsWith("https://")) url = script.video_url;
+        } catch { /* Text-only content has no video reference. */ }
+        assets.push({ id: item.id, name: item.title, type: url ? "video" : "document", date: formatDate(item.created_at), createdAt: item.created_at, source: "content", script: item.script, description: item.description, url, contentType: item.content_type });
       }
-    });
+    }));
   }
 
   if (videosData) {
-    videosData.forEach(item => {
+    await Promise.all(videosData.map(async item => {
       assets.push({
         id: item.id,
         name: item.name,
         type: 'video',
         date: formatDate(item.created_at),
-        url: item.video_url,
+        url: item.storage_path ? await signMediaPath(supabase, user.id, item.storage_path).catch(() => undefined) : item.video_url,
+        source: "saved_videos", createdAt: item.created_at,
       });
-    });
+    }));
   }
 
   if (voicesData) {
-    voicesData.forEach(item => {
+    await Promise.all(voicesData.map(async item => {
       assets.push({
         id: item.id,
         name: item.name,
         type: 'audio',
         date: formatDate(item.created_at),
         script: item.script_text,
+        url: item.storage_path ? await signMediaPath(supabase,user.id,item.storage_path).catch(() => undefined) : undefined,
+        source: "saved_voices", createdAt: item.created_at,
       });
-    });
+    }));
   }
 
   if (imagesData) {
-    imagesData.forEach(item => {
+    await Promise.all(imagesData.map(async item => {
       assets.push({
         id: item.id,
         name: item.name,
         type: 'image',
         date: formatDate(item.created_at),
-        url: item.image_url,
+        url: item.storage_path ? await signMediaPath(supabase, user.id, item.storage_path).catch(() => undefined) : item.image_url,
+        source: "saved_images", createdAt: item.created_at,
       });
-    });
+    }));
   }
 
   // Sort combined array by date descending (rough approximation since we formatted them, better to sort by raw date if needed)
-  assets.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  assets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
   const resolvedSearchParams = await searchParams;
 
@@ -110,6 +132,7 @@ export default async function MediaPage({ searchParams }: { searchParams: Promis
     if (t === 'videos') defaultTab = 'Videos';
     if (t === 'audio') defaultTab = 'Audio';
     if (t === 'images') defaultTab = 'Images';
+    if (t === 'documents') defaultTab = 'Documents';
   }
 
   return (
@@ -122,10 +145,10 @@ export default async function MediaPage({ searchParams }: { searchParams: Promis
           </h1>
           <p className="text-muted-foreground mt-1">Manage all your generated and uploaded assets.</p>
         </div>
-        <button className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2.5 px-5 rounded-xl transition-all shadow-lg hover:shadow-emerald-500/25 flex items-center gap-2">
+        <Link href="/dashboard/captions" className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2.5 px-5 rounded-xl transition-all shadow-lg hover:shadow-emerald-500/25 flex items-center gap-2">
           <Plus className="w-5 h-5" />
-          Upload Asset
-        </button>
+           Upload a Video
+        </Link>
       </div>
 
       <MediaClient initialAssets={assets} defaultTab={defaultTab} />

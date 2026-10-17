@@ -1,11 +1,13 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { MonitorPlay, Upload, Loader2, CheckCircle2, AlertCircle, PlaySquare as YoutubeIcon, Save } from "lucide-react";
 import { checkYouTubeConnectionAction, connectYouTubeAction } from "@/app/actions/youtube-auth-actions";
 import { uploadToYouTubeAction, generateYouTubeScriptAction } from "@/app/actions/youtube-upload-actions";
 import { generateVideoAction, checkVideoStatusAction, saveVideoAction } from "@/app/actions/video-actions";
 import { toast } from "sonner";
+import { pollGeneratedVideo } from "@/lib/video/poll";
+import { VIDEO_PRESENTERS } from "@/lib/video/config";
 
 export default function YoutubeGeneratorPage() {
   const [topic, setTopic] = useState("");
@@ -18,6 +20,11 @@ export default function YoutubeGeneratorPage() {
   const [isPolling, setIsPolling] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
+  const [generatedTitle, setGeneratedTitle] = useState("");
+  const [videoJobId, setVideoJobId] = useState<string | null>(null);
+  const [publishedVideoUrl, setPublishedVideoUrl] = useState<string | null>(null);
+  const generationAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => generationAbort.current?.abort(), []);
   const [uploadSuccess, setUploadSuccess] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   
@@ -32,9 +39,10 @@ export default function YoutubeGeneratorPage() {
     setIsSavingToMedia(true);
     try {
       const saveRes = await saveVideoAction({
-        name: title || "Generated YouTube Video",
+        name: generatedTitle || "Generated YouTube Video",
         video_url: generatedVideoUrl,
-        avatar_name: "AI YouTube Presenter"
+        avatar_name: VIDEO_PRESENTERS[0].name,
+        job_id: videoJobId || undefined,
       });
       if (saveRes.success) {
         toast.success("Video saved to Media Library!");
@@ -42,17 +50,18 @@ export default function YoutubeGeneratorPage() {
       } else {
         throw new Error(saveRes.error || "Failed to save");
       }
-    } catch (err: any) {
-      toast.error(err.message || "Failed to save to Media Library.");
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to save to Media Library.");
     } finally {
       setIsSavingToMedia(false);
     }
   };
 
   useEffect(() => {
+    let disposed = false;
     const params = new URLSearchParams(window.location.search);
     if (params.get('error')) {
-      setErrorMsg("Failed to connect YouTube account.");
+      queueMicrotask(() => { if (!disposed) setErrorMsg("Failed to connect YouTube account."); });
       window.history.replaceState({}, document.title, window.location.pathname);
     } else if (params.get('success')) {
       window.history.replaceState({}, document.title, window.location.pathname);
@@ -60,32 +69,17 @@ export default function YoutubeGeneratorPage() {
 
     const checkStatus = async () => {
       const res = await checkYouTubeConnectionAction();
+      if (disposed) return;
       setIsConnected(res.connected || false);
       setIsChecking(false);
     };
-    checkStatus();
+    checkStatus().catch(() => { if (!disposed) { setErrorMsg('Could not check the YouTube connection.'); setIsChecking(false); } });
+    return () => { disposed = true; };
   }, []);
 
   const handleConnect = async () => {
-    await connectYouTubeAction();
-  };
-
-  const pollVideoStatus = async (id: string): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const interval = setInterval(async () => {
-        const res = await checkVideoStatusAction(id);
-        if (!res.success) {
-          clearInterval(interval);
-          reject(new Error(res.error));
-        } else if (res.status === "done" && res.videoUrl) {
-          clearInterval(interval);
-          resolve(res.videoUrl);
-        } else if (res.status === "error") {
-          clearInterval(interval);
-          reject(new Error(res.error_message || "Generation failed"));
-        }
-      }, 3000);
-    });
+    const result = await connectYouTubeAction();
+    if (result?.error) { setErrorMsg(result.error); toast.error(result.error); }
   };
 
   const handleGenerateAndUpload = async (e: React.FormEvent) => {
@@ -98,35 +92,38 @@ export default function YoutubeGeneratorPage() {
     setErrorMsg("");
     setUploadSuccess(false);
     setGeneratedVideoUrl(null);
+    setGeneratedTitle(title.trim());
+    setPublishedVideoUrl(null);
+    setHasSavedToMedia(false);
+    setVideoJobId(null);
+    generationAbort.current?.abort();
+    const controller = new AbortController();
+    generationAbort.current = controller;
 
     try {
       // 1. Generate Script
       setIsGenerating(true);
       toast.info("Generating script with AI...");
       const scriptRes = await generateYouTubeScriptAction(topic);
+      if (controller.signal.aborted) return;
       if (!scriptRes.success || !scriptRes.script) {
         throw new Error(scriptRes.error || "Failed to generate script");
       }
 
       // 2. Generate Video with random avatar
-      const avatars = [
-        "https://images.pexels.com/photos/2379004/pexels-photo-2379004.jpeg?auto=compress&cs=tinysrgb&dpr=1&w=500", // Man in suit
-        "https://images.pexels.com/photos/733872/pexels-photo-733872.jpeg?auto=compress&cs=tinysrgb&dpr=1&w=500", // Woman 
-        "https://images.pexels.com/photos/1239291/pexels-photo-1239291.jpeg?auto=compress&cs=tinysrgb&dpr=1&w=500", // Woman smiling
-        "https://images.pexels.com/photos/1222271/pexels-photo-1222271.jpeg?auto=compress&cs=tinysrgb&dpr=1&w=500"  // Man
-      ];
-      const randomAvatarUrl = avatars[Math.floor(Math.random() * avatars.length)];
       
       toast.info("Rendering video... This may take a minute.");
-      const videoRes = await generateVideoAction(scriptRes.script, randomAvatarUrl);
+      const videoRes = await generateVideoAction(scriptRes.script, VIDEO_PRESENTERS[0].url, { name: title.trim(), avatarName: VIDEO_PRESENTERS[0].name });
+      if (controller.signal.aborted) return;
       if (!videoRes.success || !videoRes.id) {
         throw new Error(videoRes.error || "Failed to generate video");
       }
       setIsGenerating(false);
+      setVideoJobId(videoRes.id);
 
       // 3. Poll for Completion
       setIsPolling(true);
-      const videoUrl = await pollVideoStatus(videoRes.id);
+      const videoUrl = await pollGeneratedVideo(videoRes.id, checkVideoStatusAction, { signal: controller.signal });
       setGeneratedVideoUrl(videoUrl);
       setIsPolling(false);
       
@@ -142,11 +139,15 @@ export default function YoutubeGeneratorPage() {
         tags: tags.split(",").map(t => t.trim()).filter(Boolean),
         privacy_status: privacy,
         videoUrl,
+        videoJobId: videoRes.id,
       });
 
       if (!uploadRes.success) {
         throw new Error(uploadRes.error || "Failed to upload");
       }
+      if (controller.signal.aborted) return;
+      setPublishedVideoUrl(uploadRes.videoUrl || null);
+      if (uploadRes.warning) toast.warning(uploadRes.warning);
       
       setUploadSuccess(true);
       toast.success("Video successfully published to YouTube!");
@@ -158,13 +159,15 @@ export default function YoutubeGeneratorPage() {
       setTags("");
       setPrivacy("private");
       
-    } catch (err: any) {
-      setErrorMsg(err.message || "An error occurred.");
-      toast.error(err.message || "An error occurred.");
+    } catch (err: unknown) {
+      if (controller.signal.aborted) return;
+      const message = err instanceof Error ? err.message : "An error occurred.";
+      setErrorMsg(message);
+      toast.error(message);
       setIsGenerating(false);
       setIsPolling(false);
     } finally {
-      setIsUploading(false);
+      if (!controller.signal.aborted) setIsUploading(false);
     }
   };
 
@@ -216,6 +219,7 @@ export default function YoutubeGeneratorPage() {
             </div>
             <h2 className="text-2xl font-bold mb-2">Upload Successful!</h2>
             <p className="text-muted-foreground mb-8">Your video was generated and published to YouTube.</p>
+            {publishedVideoUrl && <a href={publishedVideoUrl} target="_blank" rel="noopener noreferrer" className="mb-4 text-primary underline">View your video on YouTube</a>}
             {generatedVideoUrl && (
               <div className="mb-8 w-full max-w-md aspect-video bg-black rounded-xl overflow-hidden border border-border/50">
                 <video src={generatedVideoUrl} controls className="w-full h-full object-cover" />

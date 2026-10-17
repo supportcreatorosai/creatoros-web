@@ -35,7 +35,7 @@ export default async function DashboardPage() {
     { count: savedImages },
     { count: savedVideos },
     { count: savedVoices },
-    { data: recentContent }
+    { data: recentContent, error: recentContentError }
   ] = await Promise.all([
     supabase.from('content').select('*', { count: 'exact', head: true }).eq('user_id', user.id),
     supabase.from('content').select('*', { count: 'exact', head: true }).eq('user_id', user.id).eq('status', 'draft'),
@@ -48,7 +48,10 @@ export default async function DashboardPage() {
     supabase.from('content').select('id, title, status, created_at, content_type').eq('user_id', user.id).order('created_at', { ascending: false }).limit(5)
   ]);
 
-  const mediaLibraryCount = (savedImages || 0) + (savedVideos || 0) + (savedVoices || 0);
+  const mediaLibraryCount = totalContent === null || savedImages === null || savedVideos === null || savedVoices === null
+    ? null
+    : totalContent + savedImages + savedVideos + savedVoices;
+  const displayCount = (count: number | null) => count ?? '—';
 
   const getIcon = (type: string) => {
     switch (type) {
@@ -72,14 +75,14 @@ export default async function DashboardPage() {
   };
 
   const dashboardStats = [
-    { title: 'Live Processing', value: processing || 0, desc: 'Content actively generating', color: 'bg-amber-500/10 text-amber-500 border-amber-500/30' },
-    { title: 'Media Library', value: mediaLibraryCount, desc: 'Saved images, videos, and voices', color: 'bg-fuchsia-500/10 text-fuchsia-500 border-fuchsia-500/30' },
+    { title: 'Processing Records', value: displayCount(processing), desc: 'Content marked as processing', color: 'bg-amber-500/10 text-amber-500 border-amber-500/30' },
+    { title: 'Media Library', value: displayCount(mediaLibraryCount), desc: 'Saved content, images, videos, and voices', color: 'bg-fuchsia-500/10 text-fuchsia-500 border-fuchsia-500/30' },
     { title: 'Total Tools', value: 6, desc: 'Available creative tools', color: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/30' },
-    { title: 'Total Schedules', value: scheduled || 0, desc: 'Content scheduled for posting', color: 'bg-blue-500/10 text-blue-500 border-blue-500/30' },
-    { title: 'Total Content', value: totalContent || 0, desc: 'All your educational assets', color: 'bg-emerald-500/10 text-emerald-500 border-emerald-500/30' },
-    { title: 'Published', value: published || 0, desc: 'Live on your platforms', color: 'bg-green-500/10 text-green-500 border-green-500/30' },
-    { title: 'Drafts', value: drafts || 0, desc: 'Ideas waiting to be fleshed out', color: 'bg-slate-500/10 text-slate-400 border-slate-500/30' },
-    { title: 'Storage Used', value: '1.2 GB', desc: 'Total storage consumed', color: 'bg-violet-500/10 text-violet-500 border-violet-500/30' }
+    { title: 'Planned Records', value: displayCount(scheduled), desc: 'Marked scheduled; posting is manual', color: 'bg-blue-500/10 text-blue-500 border-blue-500/30' },
+    { title: 'Total Content', value: displayCount(totalContent), desc: 'Saved content records', color: 'bg-emerald-500/10 text-emerald-500 border-emerald-500/30' },
+    { title: 'Published Records', value: displayCount(published), desc: 'Content marked as published', color: 'bg-green-500/10 text-green-500 border-green-500/30' },
+    { title: 'Drafts', value: displayCount(drafts), desc: 'Content marked as a draft', color: 'bg-slate-500/10 text-slate-400 border-slate-500/30' },
+    { title: 'Storage Used', value: '—', desc: 'Storage usage is not measured', color: 'bg-violet-500/10 text-violet-500 border-violet-500/30' }
   ];
 
   return (
@@ -141,9 +144,11 @@ export default async function DashboardPage() {
                   </Link>
                 ))}
               </div>
+            ) : recentContentError ? (
+              <p role="alert" className="text-muted-foreground">Unable to load recent content. Refresh the page to try again.</p>
             ) : (
               <div className="flex flex-col items-center justify-center h-full text-center py-12 border-2 border-dashed border-white/10 rounded-2xl bg-black/20 backdrop-blur-sm">
-                <p className="text-muted-foreground mb-6 font-medium">You haven't created any content yet.</p>
+                <p className="text-muted-foreground mb-6 font-medium">You haven&apos;t created any content yet.</p>
                 <Link href="/dashboard/lesson-generator" className="px-6 py-3 bg-primary hover:bg-primary/90 text-primary-foreground font-bold rounded-xl transition-all shadow-[0_0_20px_rgba(99,102,241,0.2)] hover:shadow-[0_0_30px_rgba(99,102,241,0.4)]">
                   Create your first content
                 </Link>

@@ -7,7 +7,7 @@ import { Suspense } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
-import { login } from "@/app/auth/actions"
+import { login, loginWithGoogle } from "@/app/auth/actions"
 
 import { Button } from "@/components/ui/button"
 import { Sparkles, ArrowRight, Eye, EyeOff } from "lucide-react"
@@ -32,6 +32,7 @@ function LoginForm() {
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
+  const [googleTerms, setGoogleTerms] = useState(false)
   const searchParams = useSearchParams()
   const redirectTo = searchParams.get("redirectTo") || "/dashboard"
 
@@ -54,26 +55,24 @@ function LoginForm() {
       formData.append("redirectTo", redirectTo)
     }
 
-    const result = await login(formData)
-    
-    if (result?.error) {
-      setError(result.error)
-      setIsLoading(false)
-    }
+    try {
+      const result = await login(formData)
+      if (result?.error) setError(result.error)
+    } catch { setError("Sign-in is unavailable. Please try again.") }
+    finally { setIsLoading(false) }
   }
 
   const handleGoogleLogin = async () => {
-    const { createClient } = await import("@/lib/supabase/client");
-    const supabase = createClient();
-    await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: {
-        redirectTo: `${window.location.origin}/auth/callback`,
-        queryParams: {
-          prompt: 'select_account',
-        },
-      },
-    });
+    setIsLoading(true)
+    setError(null)
+    const data = new FormData()
+    data.set("terms", String(googleTerms))
+    data.set("redirectTo", redirectTo)
+    try {
+      const result = await loginWithGoogle(data)
+      if (result?.error) setError(result.error)
+    } catch { setError("Google sign-in is unavailable. Please try again.") }
+    finally { setIsLoading(false) }
   }
 
   return (
@@ -139,9 +138,14 @@ function LoginForm() {
           </div>
 
           {/* Google Button */}
+          <label className="flex gap-3 text-sm text-muted-foreground">
+            <input type="checkbox" checked={googleTerms} onChange={event => setGoogleTerms(event.target.checked)} />
+            <span>Before continuing with Google, I accept the <Link href="/terms" className="text-primary underline">Terms of Service</Link> and have read the <Link href="/privacy" className="text-primary underline">Privacy Policy</Link>.</span>
+          </label>
           <button
             type="button"
             onClick={handleGoogleLogin}
+            disabled={isLoading || !googleTerms}
             className="w-full flex items-center justify-center gap-3 h-12 rounded-lg border border-border bg-card hover:bg-muted/50 text-foreground text-sm font-medium transition-all duration-200 hover:shadow-md"
           >
             <GoogleIcon />
@@ -181,9 +185,7 @@ function LoginForm() {
                 <label className="text-sm font-medium text-foreground" htmlFor="login-password">
                   Password
                 </label>
-                <Link href="#" className="text-xs text-primary hover:text-primary/80 transition-colors">
-                  Forgot password?
-                </Link>
+                <Link href="/contact" className="text-xs text-primary hover:text-primary/80 transition-colors">Account help</Link>
               </div>
               <div className="relative">
                 <input 
@@ -195,6 +197,7 @@ function LoginForm() {
                 <button 
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
                 >
                   {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
@@ -237,6 +240,7 @@ function LoginForm() {
               Create account
             </Link>
           </p>
+          {searchParams.get("error") && <p role="alert" className="text-sm text-destructive">Sign-in could not be completed. Try again or contact support.</p>}
         </div>
       </div>
     </div>

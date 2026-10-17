@@ -1,38 +1,28 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useSyncExternalStore } from "react";
 import { Sidebar } from "@/components/sidebar";
 import { Navbar } from "@/components/navbar";
+
+function subscribe(listener: () => void) {
+  window.addEventListener('storage', listener);
+  window.addEventListener('creatoros-sidebar', listener);
+  return () => { window.removeEventListener('storage', listener); window.removeEventListener('creatoros-sidebar', listener); };
+}
+function collapsedSnapshot() { try { return localStorage.getItem('sidebar_collapsed') === 'true'; } catch { return false; } }
 
 export function DashboardClientLayout({ 
   children, 
   user 
 }: { 
   children: React.ReactNode;
-  user: any;
+  user: { full_name?: string | null; email?: string | null } | null;
 }) {
-  const [isCollapsed, setIsCollapsed] = useState(false);
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-    const stored = localStorage.getItem("sidebar_collapsed");
-    if (stored === "true") {
-      setIsCollapsed(true);
-    }
-  }, []);
+  const isCollapsed = useSyncExternalStore(subscribe, collapsedSnapshot, () => false);
 
   const toggleCollapse = () => {
-    setIsCollapsed(prev => {
-      const newVal = !prev;
-      localStorage.setItem("sidebar_collapsed", String(newVal));
-      return newVal;
-    });
+    try { localStorage.setItem('sidebar_collapsed', String(!isCollapsed)); window.dispatchEvent(new Event('creatoros-sidebar')); } catch { /* Storage may be disabled by the browser. */ }
   };
-
-  if (!mounted) {
-    return <div className="min-h-screen bg-background bg-depth"></div>; // Prevent hydration mismatch flash
-  }
 
   return (
     <div className="flex min-h-screen bg-background bg-depth">

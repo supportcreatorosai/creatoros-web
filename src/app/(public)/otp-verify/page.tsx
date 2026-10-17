@@ -1,201 +1,69 @@
-"use client";
+"use client"
 
-import { useState, useEffect, useRef } from "react";
-import { useRouter } from "next/navigation";
-import emailjs from "@emailjs/browser";
-import { createClient } from "@/lib/supabase/client";
-import { verifyOTP } from "@/app/auth/actions";
-import { Button } from "@/components/ui/button";
-import { Mail, ArrowRight, ShieldCheck, RefreshCw } from "lucide-react";
+import { Suspense, useState } from "react"
+import Link from "next/link"
+import { useSearchParams } from "next/navigation"
+import { verifyOTP, resendVerification } from "@/app/auth/actions"
+import { Button } from "@/components/ui/button"
+import { ShieldCheck } from "lucide-react"
 
-export default function OTPVerifyPage() {
-  const [otp, setOtp] = useState(["", "", "", "", "", ""]);
-  const [error, setError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isSendingEmail, setIsSendingEmail] = useState(true);
-  const [emailSent, setEmailSent] = useState(false);
-  const [userEmail, setUserEmail] = useState<string | null>(null);
-  
-  const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
-  const router = useRouter();
+function VerificationForm() {
+  const params = useSearchParams()
+  const [email, setEmail] = useState(params.get("email") || "")
+  const [token, setToken] = useState("")
+  const [error, setError] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
 
-  useEffect(() => {
-    const initAndSendEmail = async () => {
-      try {
-        const supabase = createClient();
-        const { data: { user } } = await supabase.auth.getUser();
-        
-        if (!user) {
-          router.push("/login");
-          return;
-        }
-
-        setUserEmail(user.email ?? null);
-
-        // If already verified, go to dashboard
-        if (user.user_metadata?.otp_verified) {
-          router.push("/dashboard");
-          return;
-        }
-
-        // Send EmailJS Email
-        const expectedOtp = user.user_metadata?.otp;
-        if (expectedOtp && !emailSent) {
-          const serviceId = process.env.NEXT_PUBLIC_EMAILJS_SERVICE_ID || "YOUR_SERVICE_ID";
-          const templateId = process.env.NEXT_PUBLIC_EMAILJS_TEMPLATE_ID || "YOUR_TEMPLATE_ID";
-          const publicKey = process.env.NEXT_PUBLIC_EMAILJS_PUBLIC_KEY || "YOUR_PUBLIC_KEY";
-
-          if (!serviceId || serviceId === "YOUR_SERVICE_ID") {
-            // Simulate sending for dev purposes if keys are missing
-            setTimeout(() => {
-              setIsSendingEmail(false);
-              setEmailSent(true);
-            }, 1000);
-          } else {
-            await emailjs.send(serviceId, templateId, {
-              to_email: user.email,
-              otp_code: expectedOtp,
-            }, publicKey);
-            setIsSendingEmail(false);
-            setEmailSent(true);
-          }
-        }
-      } catch (err) {
-        console.error("Failed to send email:", err);
-        setError("Failed to send verification email. Please contact support.");
-        setIsSendingEmail(false);
-      }
-    };
-
-    initAndSendEmail();
-  }, [router, emailSent]);
-
-  const handleChange = (index: number, value: string) => {
-    if (value.length > 1) value = value.slice(-1);
-    if (!/^[0-9]*$/.test(value)) return;
-
-    const newOtp = [...otp];
-    newOtp[index] = value;
-    setOtp(newOtp);
-
-    // Focus next input
-    if (value !== "" && index < 5) {
-      inputRefs.current[index + 1]?.focus();
-    }
-  };
-
-  const handleKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Backspace" && otp[index] === "" && index > 0) {
-      inputRefs.current[index - 1]?.focus();
-    }
-  };
-
-  const handlePaste = (e: React.ClipboardEvent) => {
-    e.preventDefault();
-    const pastedData = e.clipboardData.getData("text").slice(0, 6).split("");
-    
-    if (pastedData.some(char => !/^[0-9]$/.test(char))) return;
-
-    const newOtp = [...otp];
-    pastedData.forEach((char, index) => {
-      if (index < 6) newOtp[index] = char;
-    });
-    setOtp(newOtp);
-    
-    const focusIndex = Math.min(pastedData.length, 5);
-    inputRefs.current[focusIndex]?.focus();
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const submittedOtp = otp.join("");
-    if (submittedOtp.length < 6) {
-      setError("Please enter the 6-digit code");
-      return;
-    }
-
-    setIsLoading(true);
-    setError(null);
-
-    const result = await verifyOTP(submittedOtp);
-    if (result?.error) {
-      setError(result.error);
-      setIsLoading(false);
-    }
-  };
+  function data() {
+    const form = new FormData()
+    form.set("email", email)
+    form.set("token", token)
+    form.set("redirectTo", params.get("redirectTo") || "/dashboard")
+    return form
+  }
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setBusy(true); setError(null); setMessage(null)
+    try {
+      const result = await verifyOTP(data())
+      if (result?.error) setError(result.error)
+    } catch {
+      setError("Verification is unavailable. Please try again.")
+    } finally { setBusy(false) }
+  }
+  async function resend() {
+    setBusy(true); setError(null); setMessage(null)
+    try {
+      const result = await resendVerification(data())
+      if (result.error) setError(result.error)
+      else setMessage(result.success || null)
+    } catch { setError("Unable to request a confirmation email right now.") }
+    finally { setBusy(false) }
+  }
 
   return (
-    <div className="flex min-h-[calc(100vh-4rem)] items-center justify-center p-6 bg-gradient-to-br from-background to-muted/20">
-      <div className="w-full max-w-[420px] p-8 rounded-2xl border border-border bg-card shadow-xl space-y-8">
-        <div className="text-center space-y-2">
-          <div className="mx-auto w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center mb-6">
-            <ShieldCheck className="w-6 h-6 text-primary" />
-          </div>
-          <h2 className="text-2xl font-bold tracking-tight text-foreground">Verify your email</h2>
-          <p className="text-muted-foreground text-sm">
-            We've sent a 6-digit code to <br/>
-            <span className="font-medium text-foreground">{userEmail || "your email"}</span>
-          </p>
-        </div>
-
-        {isSendingEmail ? (
-          <div className="flex flex-col items-center justify-center py-8 space-y-4 text-muted-foreground">
-            <RefreshCw className="w-8 h-8 animate-spin text-primary/50" />
-            <p className="text-sm">Sending verification code...</p>
-          </div>
-        ) : (
-          <form onSubmit={handleSubmit} className="space-y-6">
-            <div className="flex justify-between gap-2">
-              {otp.map((digit, index) => (
-                <input
-                  key={index}
-                  ref={el => { inputRefs.current[index] = el; }}
-                  type="text"
-                  inputMode="numeric"
-                  value={digit}
-                  onChange={(e) => handleChange(index, e.target.value)}
-                  onKeyDown={(e) => handleKeyDown(index, e)}
-                  onPaste={handlePaste}
-                  className="w-12 h-14 text-center text-xl font-bold rounded-lg border border-border bg-background focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all"
-                  maxLength={1}
-                />
-              ))}
-            </div>
-
-            {error && (
-              <div className="p-3 text-sm rounded-lg bg-destructive/10 text-destructive border border-destructive/20 text-center">
-                {error}
-              </div>
-            )}
-
-            <Button type="submit" className="w-full h-12 text-sm font-medium" disabled={isLoading || otp.join("").length < 6}>
-              {isLoading ? (
-                <span className="flex items-center gap-2">
-                  <RefreshCw className="animate-spin h-4 w-4" />
-                  Verifying...
-                </span>
-              ) : (
-                <span className="flex items-center gap-2">
-                  Verify Account <ArrowRight className="h-4 w-4" />
-                </span>
-              )}
-            </Button>
-          </form>
-        )}
-
-        <div className="text-center pt-2">
-          <p className="text-sm text-muted-foreground">
-            Didn't receive the code?{" "}
-            <button 
-              type="button"
-              className="text-primary font-medium hover:underline focus:outline-none"
-              onClick={() => window.location.reload()}
-            >
-              Resend
-            </button>
-          </p>
-        </div>
+    <div className="flex min-h-[70vh] items-center justify-center p-6">
+      <div className="w-full max-w-md rounded-2xl border border-border bg-card p-8 space-y-6">
+        <ShieldCheck className="h-10 w-10 text-primary" />
+        <h1 className="text-2xl font-bold">Confirm your email</h1>
+        <p className="text-sm text-muted-foreground">Open the confirmation link in your signup email. If the email includes a verification code, you can enter it here. Check your spam folder, or request another email below.</p>
+        <form onSubmit={submit} className="space-y-4">
+          <label className="block text-sm font-medium" htmlFor="verify-email">Email address</label>
+          <input id="verify-email" type="email" autoComplete="email" required maxLength={254} value={email} onChange={event => setEmail(event.target.value)} className="glass-input" />
+          <label className="block text-sm font-medium" htmlFor="verify-code">Verification code</label>
+          <input id="verify-code" autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{6,10}" minLength={6} maxLength={10} required value={token} onChange={event => setToken(event.target.value.replace(/\D/g, ""))} className="glass-input" />
+          {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+          {message && <p role="status" className="text-sm text-muted-foreground">{message}</p>}
+          <Button type="submit" className="w-full" disabled={busy}>{busy ? "Please wait..." : "Verify email"}</Button>
+        </form>
+        <Button variant="outline" className="w-full" onClick={resend} disabled={busy || !email}>Resend confirmation email</Button>
+        <Link href="/login" className="block text-center text-sm text-primary">Return to sign in</Link>
+        <form action="/auth/logout" method="post"><Button variant="ghost" className="w-full" type="submit">Sign out of this session</Button></form>
       </div>
     </div>
-  );
+  )
+}
+export default function VerificationPage() {
+  return <Suspense fallback={<p className="p-8">Loading verification...</p>}><VerificationForm /></Suspense>
 }

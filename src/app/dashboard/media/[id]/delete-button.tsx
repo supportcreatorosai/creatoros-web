@@ -22,7 +22,7 @@ export function DeleteButton({ id }: { id: string }) {
     setIsDeleting(true)
     try {
       await deleteContent(id)
-    } catch (e) {
+    } catch {
       setIsDeleting(false)
       alert("Failed to delete content")
     }

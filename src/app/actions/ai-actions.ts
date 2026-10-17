@@ -4,9 +4,10 @@ import { createClient } from "@/lib/supabase/server";
 import { getCustomUser } from "@/lib/auth/session";
 import { aiOrchestrator } from "@/lib/ai/orchestrator";
 import { buildLessonRequest, LessonPromptParams } from "@/lib/ai/prompts/lesson";
-import { GeneratedLesson } from "@/lib/ai/types";
+import { GeneratedLesson, LessonSchema } from "@/lib/ai/types";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
+import { enforceRateLimit, RateLimitError, RateLimitUnavailableError } from "@/lib/security/rate-limit";
 
 const LessonInputSchema = z.object({
   topic: z.string().min(1, "Topic is required").max(100, "Topic is too long"),
@@ -30,6 +31,8 @@ export async function generateLessonAction(params: LessonPromptParams) {
     }
 
     const request = buildLessonRequest(validatedParams.data);
+    const supabase = await createClient();
+    await enforceRateLimit(supabase, "lesson-generate", 10, 3600);
     const result = await aiOrchestrator.generateStructuredLesson(request);
 
     if (!result.response.success) {
@@ -50,13 +53,16 @@ export async function generateLessonAction(params: LessonPromptParams) {
       }
     };
   } catch (error: unknown) {
+    if (error instanceof RateLimitError || error instanceof RateLimitUnavailableError) return { success: false, error: error.message };
     console.error("Generate Lesson Action Error:", error);
     return { success: false, error: "An unexpected error occurred during generation." };
   }
 }
 
-export async function saveLessonAction(lesson: GeneratedLesson, topic: string) {
+export async function saveLessonAction(lesson: GeneratedLesson, topic: string, id?: string) {
   try {
+    const parsed = z.object({ lesson: LessonSchema, topic: z.string().trim().max(100), id: z.string().uuid().optional() }).safeParse({ lesson, topic, id });
+    if (!parsed.success) return { success: false, error: "Invalid lesson. Check the title and lesson content." };
     const { data: { user }, error: authError } = await getCustomUser();
 
     if (authError || !user) {
@@ -64,18 +70,19 @@ export async function saveLessonAction(lesson: GeneratedLesson, topic: string) {
     }
 
     const supabase = await createClient();
-    const { error: insertError } = await supabase
-      .from("content")
-      .insert({
-        user_id: user.id,
-        title: lesson.title,
-        topic: topic,
-        description: lesson.summary,
-        script: JSON.stringify(lesson),
+    const values = {
+        title: parsed.data.lesson.title,
+        topic: parsed.data.topic,
+        description: parsed.data.lesson.summary,
+        script: JSON.stringify(parsed.data.lesson),
         status: "ready",
         content_type: "lesson",
         platform: "general",
-      });
+      };
+    const query = parsed.data.id
+      ? supabase.from("content").update(values).eq("id", parsed.data.id).eq("user_id", user.id).eq("content_type", "lesson")
+      : supabase.from("content").insert({ user_id: user.id, ...values });
+    const { data: savedLesson, error: insertError } = await query.select("id").single();
 
     if (insertError) {
       console.error("Insert Error:", insertError);
@@ -83,7 +90,8 @@ export async function saveLessonAction(lesson: GeneratedLesson, topic: string) {
     }
 
     revalidatePath("/dashboard");
-    return { success: true };
+    revalidatePath("/dashboard/media");
+    return { success: true, id: savedLesson.id as string };
   } catch (error: unknown) {
     console.error("Save Lesson Action Error:", error);
     return { success: false, error: "An unexpected error occurred while saving." };
@@ -92,6 +100,7 @@ export async function saveLessonAction(lesson: GeneratedLesson, topic: string) {
 
 export async function getLessonByIdAction(id: string) {
   try {
+    if (!z.string().uuid().safeParse(id).success) return { success: false, error: "Invalid lesson ID." };
     const { data: { user }, error: authError } = await getCustomUser();
     if (authError || !user) {
       return { success: false, error: "Unauthorized." };
@@ -103,6 +112,7 @@ export async function getLessonByIdAction(id: string) {
       .select("*")
       .eq("id", id)
       .eq("user_id", user.id)
+      .eq("content_type", "lesson")
       .single();
 
     if (error) {
@@ -150,6 +160,7 @@ export async function getLessonsAction() {
 
 export async function deleteLessonAction(id: string) {
   try {
+    if (!z.string().uuid().safeParse(id).success) return { success: false, error: "Invalid lesson ID." };
     const { data: { user }, error: authError } = await getCustomUser();
     if (authError || !user) {
       return { success: false, error: "Unauthorized." };

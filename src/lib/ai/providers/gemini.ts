@@ -2,12 +2,6 @@ import { GoogleGenAI } from "@google/genai";
 import { AIProvider, AIProviderName, AIRequestModel, AIResponseModel, AIErrorCategory } from "../types";
 
 export class GeminiProvider implements AIProvider {
-  private client: GoogleGenAI;
-  
-  constructor() {
-    const apiKey = process.env.GEMINI_API_KEY;
-    this.client = new GoogleGenAI({ apiKey: apiKey || "" });
-  }
 
   async isAvailable(): Promise<boolean> {
     return !!process.env.GEMINI_API_KEY;
@@ -17,7 +11,7 @@ export class GeminiProvider implements AIProvider {
     return "gemini";
   }
 
-  async generateText(request: AIRequestModel): Promise<AIResponseModel> {
+  async generateText(request: AIRequestModel, signal?: AbortSignal): Promise<AIResponseModel> {
     const startTime = Date.now();
     const modelName = process.env.GEMINI_MODEL || "gemini-2.5-flash";
     
@@ -27,20 +21,21 @@ export class GeminiProvider implements AIProvider {
       }
 
       let prompt = request.prompt;
-      if (request.systemPrompt) {
-        prompt = `System Instructions: ${request.systemPrompt}\n\nTask: ${prompt}`;
-      }
 
       if (request.context) {
         prompt = `Context: ${request.context}\n\n${prompt}`;
       }
 
-      const response = await this.client.models.generateContent({
+      const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+      const response = await client.models.generateContent({
         model: modelName,
         contents: prompt,
         config: {
-          temperature: request.temperature || 0.7,
-          responseMimeType: "application/json",
+          temperature: request.temperature ?? 0.7,
+          systemInstruction: request.systemPrompt,
+          maxOutputTokens: request.maxTokens ?? 4096,
+          abortSignal: signal,
+          ...(request.responseFormat === "json" ? { responseMimeType: "application/json" } : {}),
         }
       });
 

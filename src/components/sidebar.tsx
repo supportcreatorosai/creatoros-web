@@ -12,9 +12,7 @@ import {
   Type,
   FolderOpen,
   Calendar,
-  Clock,
   BarChart,
-  Settings,
   Menu,
   MonitorPlay,
   LogOut
@@ -39,8 +37,8 @@ const sidebarNavItems = [
     icon: <Mic className="w-5 h-5 flex-shrink-0" />,
   },
   {
-    title: "Avatar Studio",
-    href: "/dashboard/avatar-studio",
+    title: "Video Generator",
+    href: "/dashboard/video-generator",
     icon: <User className="w-5 h-5 flex-shrink-0" />,
   },
   {
@@ -88,7 +86,7 @@ export function Sidebar({ isCollapsed = false }: { isCollapsed?: boolean }) {
       {/* Mobile Hamburger */}
       <div className="md:hidden fixed top-0 left-0 right-0 h-16 bg-background/80 backdrop-blur-xl border-b border-border/50 z-50 flex items-center px-4 justify-between">
         <Link href="/" className="font-semibold text-primary text-xl">CreatorOS AI</Link>
-        <button onClick={() => setMobileMenuOpen(!mobileMenuOpen)} className="p-2 bg-background/50 rounded-xl border border-border/50">
+        <button aria-label="Toggle navigation" aria-expanded={mobileMenuOpen} onClick={() => setMobileMenuOpen(!mobileMenuOpen)} className="p-2 bg-background/50 rounded-xl border border-border/50">
           <Menu className="w-6 h-6" />
         </button>
       </div>
@@ -105,7 +103,7 @@ export function Sidebar({ isCollapsed = false }: { isCollapsed?: boolean }) {
                   </div>
                 );
               }
-              const isActive = pathname === item.href;
+              const isActive = pathname === item.href || (item.href === "/dashboard/video-generator" && pathname === "/dashboard/avatar-studio");
               return (
                 <Link
                   key={index}
@@ -124,14 +122,16 @@ export function Sidebar({ isCollapsed = false }: { isCollapsed?: boolean }) {
             })}
           </nav>
           <div className="p-4 mt-8 border-t border-border/50">
-            <a
-              href="/auth/logout"
+            <form action="/auth/logout" method="post">
+            <button
+              type="submit"
               onClick={() => setMobileMenuOpen(false)}
-              className="flex items-center gap-3 rounded-xl px-3 py-3 transition-all text-red-500 hover:bg-red-500/10 border border-transparent"
+              className="flex w-full items-center gap-3 rounded-xl px-3 py-3 transition-all text-red-500 hover:bg-red-500/10 border border-transparent"
             >
               <LogOut className="w-5 h-5 flex-shrink-0" />
               <span className="text-base font-semibold">Sign Out</span>
-            </a>
+            </button>
+            </form>
           </div>
         </div>
       </div>
@@ -155,7 +155,7 @@ export function Sidebar({ isCollapsed = false }: { isCollapsed?: boolean }) {
                   </div>
                 );
               }
-              const isActive = pathname === item.href;
+              const isActive = pathname === item.href || (item.href === "/dashboard/video-generator" && pathname === "/dashboard/avatar-studio");
               return (
                 <Link
                   key={index}
@@ -178,8 +178,9 @@ export function Sidebar({ isCollapsed = false }: { isCollapsed?: boolean }) {
         </div>
         
         <div className="flex-shrink-0 p-2 w-64 border-t border-border/50">
-          <a
-            href="/auth/logout"
+          <form action="/auth/logout" method="post">
+          <button
+            type="submit"
             className="flex items-center gap-3 rounded-xl px-3 py-2.5 transition-all w-full relative group/item overflow-hidden text-red-500 hover:bg-red-500/10 border border-transparent"
             title="Sign Out"
           >
@@ -189,7 +190,8 @@ export function Sidebar({ isCollapsed = false }: { isCollapsed?: boolean }) {
             <span className={`whitespace-nowrap font-semibold transition-opacity duration-300 ${isCollapsed ? 'opacity-0 group-hover:opacity-100' : 'opacity-100'}`}>
               Sign Out
             </span>
-          </a>
+          </button>
+          </form>
         </div>
       </aside>
     </>

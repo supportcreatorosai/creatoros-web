@@ -1,43 +1,49 @@
 import { NextResponse } from 'next/server'
+import { cookies } from 'next/headers'
 import { createClient } from '@/lib/supabase/server'
+import { safeRedirectPath } from '@/lib/security/validation'
+import { recordTermsAcceptance } from '@/lib/auth/terms'
+import { hasVerifiedEmail, TERMS_PENDING_COOKIE, TERMS_VERSION } from '@/lib/auth/validation'
 
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url)
+  const next = safeRedirectPath(searchParams.get('next'))
+  const supabase = await createClient()
   const code = searchParams.get('code')
-  
-  // if "next" is in param, use it as the redirect URL
-  const next = searchParams.get('next') ?? '/dashboard'
+  const tokenHash = searchParams.get('token_hash')
+  const type = searchParams.get('type')
+  const result = code
+    ? await supabase.auth.exchangeCodeForSession(code)
+    : tokenHash && (type === 'email' || type === 'signup')
+      ? await supabase.auth.verifyOtp({ token_hash: tokenHash, type: 'email' })
+      : null
 
-  if (code) {
-    const supabase = await createClient()
-    const { error } = await supabase.auth.exchangeCodeForSession(code)
-    if (!error) {
-      const { data: { user } } = await supabase.auth.getUser()
-      
-      if (user) {
-        // Check if user has already verified OTP
-        const otpVerified = user.user_metadata?.otp_verified
-        
-        if (!otpVerified) {
-          // Generate OTP for new Google user or unverified user
-          const otp = Math.floor(100000 + Math.random() * 900000).toString()
-          
-          await supabase.auth.updateUser({
-            data: {
-              otp: otp,
-              otp_verified: false,
-              is_first_login: user.user_metadata?.is_first_login !== false // If not explicitly false, it's true
-            }
-          })
-          
-          return NextResponse.redirect(`${origin}/otp-verify`)
-        }
+  const cookieStore = await cookies()
+  const accepted = cookieStore.get(TERMS_PENDING_COOKIE)?.value === TERMS_VERSION
+  cookieStore.set(TERMS_PENDING_COOKIE, '', { path: '/auth/callback', maxAge: 0 })
+  let target = '/login?error=AuthError'
+  if (result && !result.error) {
+    const { data: { user } } = await supabase.auth.getUser()
+    if (user && hasVerifiedEmail(user)) {
+      const google = user.app_metadata?.provider === 'google'
+      const existingConsent = google && !accepted
+        ? await supabase.from('terms_acceptances').select('terms_version').eq('user_id', user.id).eq('terms_version', TERMS_VERSION).maybeSingle()
+        : null
+      if (google && !accepted && !existingConsent?.data) {
+        await supabase.auth.signOut()
+        target = '/register?error=TermsRequired'
+      } else if (await recordTermsAcceptance(supabase, user, accepted)) target = next
+      else {
+        await supabase.auth.signOut()
+        target = '/login?error=TermsUnavailable'
       }
-
-      return NextResponse.redirect(`${origin}${next}`)
+    } else {
+      const query = new URLSearchParams({ redirectTo: next })
+      if (user?.email) query.set('email', user.email)
+      target = '/otp-verify?' + query
     }
   }
-
-  // return the user to an error page with instructions
-  return NextResponse.redirect(`${origin}/login?error=AuthError`)
+  const response = NextResponse.redirect(new URL(target, origin))
+  response.headers.set('Cache-Control', 'private, no-store')
+  return response
 }

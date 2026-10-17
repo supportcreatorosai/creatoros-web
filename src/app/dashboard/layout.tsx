@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import { DashboardClientLayout } from "./dashboard-client-layout";
+import { hasVerifiedEmail } from '@/lib/auth/validation';
 
 export default async function DashboardLayout({
   children,
@@ -13,6 +14,11 @@ export default async function DashboardLayout({
   const { data: { user }, error: userError } = await supabase.auth.getUser();
   if (userError || !user) {
     redirect("/login");
+  }
+  if (!hasVerifiedEmail(user)) {
+    const query = new URLSearchParams()
+    if (user.email) query.set('email', user.email)
+    redirect(`/otp-verify?${query}`)
   }
 
   // Fetch full_name from profiles

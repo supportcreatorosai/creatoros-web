@@ -1,6 +1,13 @@
 import { NextResponse } from 'next/server';
+import { getCustomUser } from '@/lib/auth/session';
+import { createClient } from '@/lib/supabase/server';
+import { fetchMedia, MediaFetchError } from '@/lib/security/safe-fetch';
+import { enforceRateLimit, RateLimitError, RateLimitUnavailableError } from '@/lib/security/rate-limit';
+import { sanitizeFilename } from '@/lib/security/validation';
 
 export async function GET(request: Request) {
+  const { data: { user } } = await getCustomUser();
+  if (!user) return new NextResponse('Unauthorized', { status: 401 });
   const { searchParams } = new URL(request.url);
   const url = searchParams.get('url');
   const customFilename = searchParams.get('filename');
@@ -10,29 +17,23 @@ export async function GET(request: Request) {
   }
 
   try {
-    // Fetch the remote file
-    const response = await fetch(url);
-    
-    if (!response.ok) {
-      throw new Error(`Failed to fetch remote file: ${response.statusText}`);
-    }
-
-    // Get the file as a buffer
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    const contentType = response.headers.get('content-type') || 'application/octet-stream';
-    const filename = customFilename || "creatoros_download";
+    await enforceRateLimit(await createClient(), 'media-download', 30, 60);
+    const { buffer, contentType } = await fetchMedia(url);
+    const filename = sanitizeFilename(customFilename);
 
     // Create the response with attachment headers
-    return new NextResponse(buffer, {
+    return new NextResponse(new Uint8Array(buffer), {
       headers: {
         'Content-Type': contentType,
         'Content-Disposition': `attachment; filename="${filename}"`,
+        'Cache-Control': 'private, no-store',
+        'X-Content-Type-Options': 'nosniff',
       },
     });
   } catch (error) {
-    console.error('Download proxy error:', error);
-    return new NextResponse('Failed to download file', { status: 500 });
+    if (error instanceof MediaFetchError || error instanceof RateLimitError || error instanceof RateLimitUnavailableError) {
+      return new NextResponse(error.message, { status: error.status });
+    }
+    return new NextResponse('Failed to download file', { status: 502 });
   }
 }

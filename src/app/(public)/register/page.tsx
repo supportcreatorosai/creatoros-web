@@ -7,23 +7,11 @@ import { Suspense } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
-import { signup } from "@/app/auth/actions"
+import { signup, loginWithGoogle } from "@/app/auth/actions"
+import { registerSchema } from "@/lib/auth/validation"
 
 import { Button } from "@/components/ui/button"
-import { Sparkles, ArrowRight, Eye, EyeOff, CheckCircle } from "lucide-react"
-
-const registerSchema = z.object({
-  name: z.string().min(2, { message: "Name must be at least 2 characters" }),
-  email: z.string().email({ message: "Please enter a valid email address" }),
-  password: z.string().min(6, { message: "Password must be at least 6 characters" }),
-  confirmPassword: z.string(),
-  terms: z.boolean().refine(val => val === true, {
-    message: "You must agree to the Terms of Service and Privacy Policy"
-  })
-}).refine(data => data.password === data.confirmPassword, {
-  message: "Passwords do not match",
-  path: ["confirmPassword"],
-})
+import { Sparkles, ArrowRight, Eye, EyeOff } from "lucide-react"
 
 function GoogleIcon() {
   return (
@@ -38,7 +26,6 @@ function GoogleIcon() {
 
 function RegisterForm() {
   const [error, setError] = useState<string | null>(null)
-  const [successMessage, setSuccessMessage] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const searchParams = useSearchParams()
@@ -58,27 +45,35 @@ function RegisterForm() {
   async function onSubmit(values: z.infer<typeof registerSchema>) {
     setIsLoading(true)
     setError(null)
-    setSuccessMessage(null)
 
     const formData = new FormData()
     formData.append("name", values.name)
     formData.append("email", values.email)
     formData.append("password", values.password)
     formData.append("confirm-password", values.confirmPassword)
+    formData.append("terms", String(values.terms))
     if (redirectTo) {
       formData.append("redirectTo", redirectTo)
     }
 
-    const result = await signup(formData)
-    
-    if (result?.error) {
-      setError(result.error)
-      setIsLoading(false)
-    }
+    try {
+      const result = await signup(formData)
+      if (result?.error) setError(result.error)
+    } catch { setError("Registration is unavailable. Please try again.") }
+    finally { setIsLoading(false) }
   }
 
-  const handleGoogleLogin = () => {
-    // Implement Google OAuth redirect later
+  const handleGoogleLogin = async () => {
+    if (!(await form.trigger("terms"))) return
+    setIsLoading(true); setError(null)
+    const data = new FormData()
+    data.set("terms", String(form.getValues("terms")))
+    data.set("redirectTo", redirectTo)
+    try {
+      const result = await loginWithGoogle(data)
+      if (result?.error) setError(result.error)
+    } catch { setError("Google sign-in is unavailable. Please try again.") }
+    finally { setIsLoading(false) }
   }
 
   return (
@@ -96,7 +91,7 @@ function RegisterForm() {
           <div className="space-y-6">
             <div className="inline-flex items-center gap-2 rounded-full bg-white/10 backdrop-blur-sm px-4 py-2 text-sm text-white/90 border border-white/10">
               <Sparkles className="h-4 w-4" />
-              Join thousands of creators
+              Create your workspace
             </div>
             <h1 className="text-4xl xl:text-5xl font-bold text-white leading-tight">
               Start creating with<br />
@@ -142,11 +137,13 @@ function RegisterForm() {
               Get started with CreatorOS AI for free
             </p>
           </div>
+          {searchParams.get('error') && <p role="alert" className="text-sm text-destructive">Accept the terms below before continuing with Google.</p>}
 
           {/* Google Button */}
           <button
             type="button"
             onClick={handleGoogleLogin}
+            disabled={isLoading}
             className="w-full flex items-center justify-center gap-3 h-12 rounded-lg border border-border bg-card hover:bg-muted/50 text-foreground text-sm font-medium transition-all duration-200 hover:shadow-md"
           >
             <GoogleIcon />
@@ -163,13 +160,6 @@ function RegisterForm() {
               </span>
             </div>
           </div>
-
-          {successMessage && (
-            <div className="flex items-start gap-3 p-4 rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-              <CheckCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
-              <div className="text-sm">{successMessage}</div>
-            </div>
-          )}
 
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
             <div className="space-y-2">
@@ -211,13 +201,14 @@ function RegisterForm() {
                 <input 
                   id="reg-password" 
                   type={showPassword ? "text" : "password"}
-                  placeholder="Min. 6 characters"
+                  placeholder="Min. 8 characters"
                   className="glass-input pr-10"
                   {...form.register("password")}
                 />
                 <button 
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
                 >
                   {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
@@ -255,7 +246,7 @@ function RegisterForm() {
                 <Link href="/terms" target="_blank" className="text-primary hover:underline">
                   Terms of Service
                 </Link>{" "}
-                and{" "}
+                and have read the{" "}
                 <Link href="/privacy" target="_blank" className="text-primary hover:underline">
                   Privacy Policy
                 </Link>.

@@ -1,13 +1,17 @@
 "use client";
 
-import { useState } from "react";
-import { Search, Filter, Plus, FileVideo, FileAudio, FileImage, FileText, MoreVertical, LayoutGrid, List, X } from "lucide-react";
+import { useState, useMemo } from "react";
+import { Search, FileVideo, FileAudio, FileImage, FileText, MoreVertical, LayoutGrid, List, X, Copy, Loader2 } from "lucide-react";
 import { deleteImageAction } from "@/app/actions/image-actions";
 import { deleteVideoAction } from "@/app/actions/video-actions";
 import { deleteVoiceAction } from "@/app/actions/voice-actions";
 import { deleteLessonAction } from "@/app/actions/ai-actions";
+import { deleteShortAction } from "@/app/actions/caption-actions";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
+import { useSpeechPreview } from "@/lib/speech/use-speech-preview";
+import { extractLibraryScript } from '@/lib/media/scripts';
+import { toast } from 'sonner';
 
 export type AssetType = 'lesson' | 'video' | 'audio' | 'image' | 'document';
 
@@ -16,6 +20,9 @@ export type Asset = {
   name: string;
   type: AssetType;
   date: string;
+  createdAt: string;
+  source: "content" | "saved_videos" | "saved_voices" | "saved_images";
+  contentType?: string;
   url?: string;
   script?: string;
   description?: string;
@@ -27,10 +34,34 @@ export function MediaClient({ initialAssets, defaultTab = 'All' }: { initialAsse
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
+  const [videoTime, setVideoTime] = useState(0);
+  const [copying, setCopying] = useState(false);
   
   const router = useRouter();
+  const speech = useSpeechPreview();
+  const closePreview = () => { speech.stop(); setSelectedAsset(null); setVideoTime(0); };
 
-  const tabs = ['All', 'Lessons', 'Videos', 'Audio', 'Images'];
+  const tabs = ['All', 'Lessons', 'Videos', 'Audio', 'Images', 'Documents'];
+  const videoCaptions = useMemo(() => {
+    try {
+      const script = JSON.parse(selectedAsset?.script || "{}");
+      if (script.captionsBurned === true) return [];
+      return Array.isArray(script.captions) ? script.captions as { word: string; start: number; end: number }[] : [];
+    } catch { return []; }
+  }, [selectedAsset]);
+  const activeCaption = videoCaptions.find(caption => videoTime >= caption.start && videoTime <= caption.end)?.word;
+  const reusableScript = useMemo(() => extractLibraryScript(selectedAsset?.script), [selectedAsset?.script]);
+
+  const copyScript = async () => {
+    if (!reusableScript) return;
+    setCopying(true);
+    try {
+      await navigator.clipboard.writeText(reusableScript);
+      toast.success('Script copied. Paste it into Voice Studio or Video Generator.');
+    } catch { toast.error('Could not copy automatically. Select the script text and copy it manually.'); }
+    finally { setCopying(false); }
+  };
 
   const getIcon = (type: string) => {
     switch(type) {
@@ -61,6 +92,7 @@ export function MediaClient({ initialAssets, defaultTab = 'All' }: { initialAsse
     else if (activeTab === 'Videos' && asset.type === 'video') matchesTab = true;
     else if (activeTab === 'Audio' && asset.type === 'audio') matchesTab = true;
     else if (activeTab === 'Images' && asset.type === 'image') matchesTab = true;
+    else if (activeTab === 'Documents' && asset.type === 'document') matchesTab = true;
 
     return matchesSearch && matchesTab;
   });
@@ -72,7 +104,10 @@ export function MediaClient({ initialAssets, defaultTab = 'All' }: { initialAsse
     let success = false;
     let errorMsg = "Failed to delete";
     try {
-      if (asset.type === 'image') {
+      if (asset.source === "content") {
+        const res = asset.contentType === "short" || asset.contentType === "short_video" ? await deleteShortAction(asset.id) : await deleteLessonAction(asset.id);
+        success = res.success; errorMsg = res.error || errorMsg;
+      } else if (asset.type === 'image') {
         const res = await deleteImageAction(asset.id);
         success = res.success; errorMsg = res.error || errorMsg;
       } else if (asset.type === 'video') {
@@ -90,6 +125,7 @@ export function MediaClient({ initialAssets, defaultTab = 'All' }: { initialAsse
     }
     setIsDeleting(null);
     if (!success) alert(errorMsg);
+    else { setSelectedAsset(null); router.refresh(); }
   };
 
   const handleDownload = (asset: Asset) => {
@@ -97,11 +133,11 @@ export function MediaClient({ initialAssets, defaultTab = 'All' }: { initialAsse
     if (asset.url) {
       let extension = '';
       if (asset.type === 'video') extension = '.mp4';
-      else if (asset.type === 'audio') extension = '.mp3';
+      else if (asset.type === 'audio') extension = '.wav';
       else if (asset.type === 'image') extension = '.jpg';
       const filename = `${asset.name.replace(/\s+/g, '_')}_${new Date().getTime()}${extension}`;
       
-      const proxyUrl = `/api/download?url=${encodeURIComponent(asset.url)}&filename=${encodeURIComponent(filename)}`;
+      const proxyUrl = asset.url.startsWith("data:image/") ? asset.url : `/api/download?url=${encodeURIComponent(asset.url)}&filename=${encodeURIComponent(filename)}`;
       const a = document.createElement('a');
       a.href = proxyUrl;
       a.download = filename;
@@ -115,7 +151,7 @@ export function MediaClient({ initialAssets, defaultTab = 'All' }: { initialAsse
         // Pretty print if it's JSON
         const parsed = JSON.parse(content);
         content = JSON.stringify(parsed, null, 2);
-      } catch (e) {}
+      } catch { /* Plain scripts are downloaded as text. */ }
       
       const blob = new Blob([content], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
@@ -163,18 +199,14 @@ export function MediaClient({ initialAssets, defaultTab = 'All' }: { initialAsse
         </div>
         
         <div className="flex items-center gap-3 w-full md:w-auto">
-          <button className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-border/50 bg-background/50 hover:bg-background transition-colors text-sm font-medium">
-            <Filter className="w-4 h-4" />
-            Filter
-          </button>
           <div className="flex bg-background/50 border border-border/50 rounded-xl p-1">
-            <button className="p-1.5 rounded-lg bg-background shadow-sm"><LayoutGrid className="w-4 h-4" /></button>
-            <button className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground"><List className="w-4 h-4" /></button>
+            <button aria-label="Grid view" aria-pressed={viewMode === "grid"} onClick={() => setViewMode("grid")} className={`p-1.5 rounded-lg ${viewMode === "grid" ? "bg-background shadow-sm" : "text-muted-foreground"}`}><LayoutGrid className="w-4 h-4" /></button>
+            <button aria-label="List view" aria-pressed={viewMode === "list"} onClick={() => setViewMode("list")} className={`p-1.5 rounded-lg ${viewMode === "list" ? "bg-background shadow-sm" : "text-muted-foreground"}`}><List className="w-4 h-4" /></button>
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6 relative z-10">
+      <div className={`grid gap-6 relative z-10 ${viewMode === "grid" ? "grid-cols-2 md:grid-cols-3 lg:grid-cols-4" : "grid-cols-1"}`}>
         {filteredAssets.length === 0 ? (
           <div className="col-span-full py-12 flex flex-col items-center justify-center text-muted-foreground">
             <FileText className="w-12 h-12 mb-4 opacity-20" />
@@ -182,10 +214,10 @@ export function MediaClient({ initialAssets, defaultTab = 'All' }: { initialAsse
           </div>
         ) : (
           filteredAssets.map((asset) => (
-            <div key={asset.id} className="group relative rounded-2xl border border-border/50 bg-background/30 hover:bg-background/50 transition-all hover:shadow-xl hover:-translate-y-1 cursor-pointer flex flex-col" onClick={() => setSelectedAsset(asset)}>
+            <div key={`${asset.source}:${asset.id}`} className="group relative rounded-2xl border border-border/50 bg-background/30 hover:bg-background/50 transition-all hover:shadow-xl hover:-translate-y-1 cursor-pointer flex flex-col" onClick={() => { speech.stop(); setVideoTime(0); setSelectedAsset(asset); }}>
               <div className={`h-32 rounded-t-2xl flex items-center justify-center border-b border-border/50 relative overflow-hidden ${getBg(asset.type)}`}>
                 {asset.url && asset.type === 'image' ? (
-                  <Image src={asset.url} alt={asset.name} fill className="object-cover w-full h-full" />
+                  <Image src={asset.url} alt={asset.name} fill unoptimized sizes="(max-width: 768px) 50vw, 25vw" className="object-cover w-full h-full" />
                 ) : getIcon(asset.type)}
               </div>
               <div className="p-4 flex-1 flex flex-col justify-between relative">
@@ -226,18 +258,21 @@ export function MediaClient({ initialAssets, defaultTab = 'All' }: { initialAsse
 
       {/* Preview Modal */}
       {selectedAsset && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm" onClick={() => setSelectedAsset(null)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm" onClick={closePreview}>
           <div className="relative bg-card border border-border rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
             <div className="p-4 border-b border-border/50 flex justify-between items-center bg-background/50">
               <h3 className="font-bold text-lg truncate pr-8">{selectedAsset.name}</h3>
-              <button onClick={() => setSelectedAsset(null)} className="p-2 rounded-full hover:bg-muted transition-colors">
+              <button aria-label="Close preview" onClick={closePreview} className="p-2 rounded-full hover:bg-muted transition-colors">
                 <X className="w-5 h-5" />
               </button>
             </div>
             
             <div className="flex-1 overflow-y-auto p-6 flex flex-col items-center justify-center bg-black/20 relative">
               {selectedAsset.type === 'video' && selectedAsset.url && (
-                <video src={selectedAsset.url} controls className="max-w-full max-h-[60vh] rounded-xl shadow-lg" autoPlay />
+                <div className="relative">
+                  <video src={selectedAsset.url} controls className="max-w-full max-h-[60vh] rounded-xl shadow-lg" onTimeUpdate={event => setVideoTime(event.currentTarget.currentTime)} />
+                  {activeCaption && <p className="pointer-events-none absolute bottom-[15%] left-0 right-0 text-center text-white font-bold text-2xl drop-shadow-lg">{activeCaption}</p>}
+                </div>
               )}
               {selectedAsset.type === 'audio' && (
                 <div className="w-full max-w-2xl text-left flex flex-col items-center space-y-6 mt-4">
@@ -252,25 +287,18 @@ export function MediaClient({ initialAssets, defaultTab = 'All' }: { initialAsse
                          <span className="text-sm font-medium">Text-to-Speech Preview</span>
                        </div>
                        <button 
-                         onClick={(e) => {
-                           const target = e.currentTarget;
-                           if (target.textContent?.includes("Stop")) {
-                             window.speechSynthesis.cancel();
-                             target.innerHTML = "Play Audio";
-                           } else {
-                             const utterance = new SpeechSynthesisUtterance(selectedAsset.script || "");
-                             utterance.onend = () => { target.innerHTML = "Play Audio"; };
-                             window.speechSynthesis.cancel();
-                             window.speechSynthesis.speak(utterance);
-                             target.innerHTML = "Stop Audio";
-                           }
-                         }} 
+                         disabled={speech.supported === false}
+                         onClick={() => {
+                           if (speech.status === "playing" || speech.status === "starting") speech.stop();
+                           else speech.speak(selectedAsset.script || "");
+                         }}
                          className="px-6 py-2 bg-violet-600 hover:bg-violet-700 text-white font-medium text-sm rounded-full transition-colors w-32 text-center"
                        >
-                         Play Audio
+                         {speech.status === "starting" ? "Starting..." : speech.status === "playing" ? "Stop Preview" : "Play Preview"}
                        </button>
                     </div>
                   )}
+                  {speech.error && <p role="alert" className="text-sm text-destructive">{speech.error}</p>}
                   {selectedAsset.script && (
                     <div className="w-full bg-background/50 p-6 rounded-xl border border-border">
                       <h4 className="font-bold text-violet-400 mb-2 flex items-center gap-2">
@@ -286,7 +314,7 @@ export function MediaClient({ initialAssets, defaultTab = 'All' }: { initialAsse
                   <Image src={selectedAsset.url} alt={selectedAsset.name} fill className="object-contain drop-shadow-2xl" unoptimized />
                 </div>
               )}
-              {selectedAsset.type === 'lesson' && (
+              {(selectedAsset.type === 'lesson' || selectedAsset.type === 'document') && (
                 <div className="w-full max-w-3xl mx-auto text-left space-y-6">
                   {selectedAsset.description && (
                     <div className="bg-indigo-500/10 border border-indigo-500/20 p-5 rounded-2xl">
@@ -299,14 +327,15 @@ export function MediaClient({ initialAssets, defaultTab = 'All' }: { initialAsse
                   {selectedAsset.script && (
                     <div className="bg-background/80 p-6 rounded-2xl border border-border shadow-inner">
                       <h4 className="font-bold mb-4 flex items-center gap-2">
-                        <LayoutGrid className="w-4 h-4" /> Lesson Content
+                        <LayoutGrid className="w-4 h-4" /> Content
                       </h4>
                       <div className="text-sm leading-relaxed overflow-y-auto custom-scrollbar pr-2 whitespace-pre-wrap max-h-[40vh]">
                         {(() => {
+                          if (reusableScript) return reusableScript;
                           try {
                             const parsed = JSON.parse(selectedAsset.script);
                             return JSON.stringify(parsed, null, 2);
-                          } catch (e) {
+                          } catch {
                             return selectedAsset.script;
                           }
                         })()}
@@ -317,7 +346,10 @@ export function MediaClient({ initialAssets, defaultTab = 'All' }: { initialAsse
               )}
             </div>
             
-            <div className="p-4 border-t border-border/50 flex justify-end gap-3 bg-background/50">
+            <div className="p-4 border-t border-border/50 flex flex-wrap justify-end gap-3 bg-background/50">
+              {reusableScript && <button type="button" disabled={copying} onClick={copyScript} className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl border border-border font-bold hover:bg-muted disabled:opacity-50">
+                {copying ? <Loader2 className="h-4 w-4 animate-spin" /> : <Copy className="h-4 w-4" />} {copying ? 'Copying…' : 'Copy script'}
+              </button>}
               {selectedAsset.type === 'lesson' && (
                 <button 
                   onClick={() => router.push(`/dashboard/lesson-generator?lessonId=${selectedAsset.id}`)}

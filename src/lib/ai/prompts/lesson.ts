@@ -42,5 +42,6 @@ Ensure the content is tailored appropriately to the audience and difficulty leve
     prompt,
     systemPrompt,
     temperature: 0.7,
+    responseFormat: "json",
   };
 }

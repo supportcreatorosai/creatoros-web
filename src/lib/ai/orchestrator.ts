@@ -1,140 +1,85 @@
-import { AIProvider, AIRequestModel, AIResponseModel, GeneratedLesson, LessonSchema } from "./types";
+import { AIProvider, AIRequestModel, AIRequestSchema, AIResponseModel, GeneratedLesson, LessonSchema } from "./types";
 import { GeminiProvider } from "./providers/gemini";
 import { OllamaProvider } from "./providers/ollama";
-import { OpenClawProvider } from "./providers/openclaw";
-import { ZodError } from "zod";
+import { parseSlides, type VideoSlide } from "@/lib/video/slides";
+
+export function parseLesson(text: string): GeneratedLesson {
+  const json = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  return LessonSchema.parse(JSON.parse(json));
+}
 
 export class AIOrchestrator {
-  private getProviderInstance(name: string): AIProvider {
-    switch (name.toLowerCase()) {
-      case "gemini":
-        return new GeminiProvider();
-      case "ollama":
-        return new OllamaProvider();
-      case "openclaw":
-        return new OpenClawProvider();
-      default:
-        return new GeminiProvider();
-    }
-  }
-
   async resolveProviders(): Promise<AIProvider[]> {
-    const configuredProviderName = (process.env.AI_PROVIDER || "gemini").toLowerCase();
-    const fallbackProviderName = (process.env.AI_FALLBACK_PROVIDER || "ollama").toLowerCase();
-
-    const order = [configuredProviderName];
-    if (fallbackProviderName && fallbackProviderName !== configuredProviderName) {
-      order.push(fallbackProviderName);
-    }
-    
-    const all = ["gemini", "ollama", "openclaw"];
-    for (const p of all) {
-      if (!order.includes(p)) order.push(p);
-    }
-
-    return order.map(name => this.getProviderInstance(name));
+    const names = [process.env.AI_PROVIDER || "gemini", process.env.AI_FALLBACK_PROVIDER || "ollama"];
+    return [...new Set(names.map(name => name.toLowerCase()))].flatMap((name): AIProvider[] => {
+      if (name === "gemini") return [new GeminiProvider()];
+      if (name === "ollama") return [new OllamaProvider()];
+      return [];
+    });
   }
 
-  private withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-    return Promise.race([
-      promise,
-      new Promise<T>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), ms))
-    ]);
+  private async generate(request: AIRequestModel, validate?: (text: string) => void): Promise<AIResponseModel> {
+    const parsed = AIRequestSchema.safeParse(request);
+    if (!parsed.success) {
+      return { provider: "gemini", model: "unknown", text: "", success: false, duration: 0, error: "Invalid AI request.", errorCategory: "INVALID_REQUEST" };
+    }
+    const configuredTimeout = Number(process.env.AI_TIMEOUT_MS || 30000);
+    const timeoutMs = Number.isFinite(configuredTimeout) ? Math.max(1000, Math.min(configuredTimeout, 120000)) : 30000;
+    const started = Date.now();
+    let lastResponse: AIResponseModel | undefined;
+    for (const provider of await this.resolveProviders()) {
+      const controller = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const response = await Promise.race([
+          (async () => {
+            if (!await provider.isAvailable(controller.signal)) return undefined;
+            return provider.generateText(parsed.data, controller.signal);
+          })(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => { controller.abort(); reject(new Error("TIMEOUT")); }, timeoutMs);
+          }),
+        ]);
+        if (!response) continue;
+        lastResponse = response;
+        if (!response.success) continue;
+        if (!response.text.trim()) {
+          lastResponse = { ...response, success: false, error: "AI returned an empty response.", errorCategory: "INVALID_RESPONSE" };
+          continue;
+        }
+        try {
+          validate?.(response.text);
+          return response;
+        } catch {
+          lastResponse = { ...response, success: false, error: "AI returned an invalid lesson. Please try again.", errorCategory: "INVALID_RESPONSE" };
+        }
+      } catch (error) {
+        const timedOut = error instanceof Error && error.message === "TIMEOUT";
+        lastResponse = {
+          provider: provider.getProviderName(), model: "unknown", text: "", success: false, duration: Date.now() - started,
+          error: timedOut ? "AI generation timed out. Please try again." : "AI generation is temporarily unavailable.",
+          errorCategory: timedOut ? "TIMEOUT" : "PROVIDER_UNAVAILABLE",
+        };
+      } finally {
+        if (timer) clearTimeout(timer);
+        controller.abort();
+      }
+    }
+    return lastResponse || { provider: "gemini", model: "unknown", text: "", success: false, duration: Date.now() - started, error: "No configured AI provider is available.", errorCategory: "PROVIDER_UNAVAILABLE" };
   }
 
   async generateRaw(request: AIRequestModel): Promise<AIResponseModel> {
-    const providers = await this.resolveProviders();
-    const timeoutMs = parseInt(process.env.AI_TIMEOUT_MS || "30000", 10);
-    const startTime = Date.now();
-    let lastErrorResponse: AIResponseModel | null = null;
-    
-    for (const provider of providers) {
-      if (!(await provider.isAvailable())) {
-         continue;
-      }
-      
-      try {
-        const response = await this.withTimeout(provider.generateText(request), timeoutMs);
-        if (response.success) {
-          console.log(`[AI Orchestrator] [${request.task}] Success: ${response.success} | Provider: ${response.provider} | Model: ${response.model} | Duration: ${response.duration}ms${response.errorCategory ? ` | Error: ${response.errorCategory}` : ''}`);
-          return response;
-        } else {
-          lastErrorResponse = response;
-          console.warn(`[AI Orchestrator] Provider ${provider.getProviderName()} failed to generate: ${response.error}`);
-        }
-      } catch (e: unknown) {
-        const duration = Date.now() - startTime;
-        const isTimeout = e instanceof Error && e.message === "TIMEOUT";
-        
-        console.error(`[AI Orchestrator] [${request.task}] Failed: Provider: ${provider.getProviderName()} | Duration: ${duration}ms | Error: ${isTimeout ? 'TIMEOUT' : 'UNKNOWN'}`);
-        
-        lastErrorResponse = {
-          provider: provider.getProviderName(),
-          model: "unknown",
-          text: "",
-          success: false,
-          duration,
-          error: isTimeout ? "The AI generation request timed out. Please try again." : "An unexpected error occurred during generation.",
-          errorCategory: isTimeout ? "TIMEOUT" : "UNKNOWN_ERROR"
-        };
-      }
-    }
+    return this.generate(request);
+  }
 
-    if (lastErrorResponse) {
-      return lastErrorResponse;
-    }
-
-    return {
-      provider: "gemini",
-      model: "unknown",
-      text: "",
-      success: false,
-      duration: Date.now() - startTime,
-      error: "All AI providers failed or are unavailable.",
-      errorCategory: "PROVIDER_UNAVAILABLE"
-    };
+  async generateSlides(request: AIRequestModel): Promise<{ data?: VideoSlide[]; response: AIResponseModel }> {
+    const response = await this.generate({ ...request, task: "script_generation", responseFormat: "json" }, parseSlides);
+    return response.success ? { data: parseSlides(response.text), response } : { response };
   }
 
   async generateStructuredLesson(request: AIRequestModel): Promise<{ data?: GeneratedLesson; response: AIResponseModel }> {
-    const response = await this.generateRaw({
-      ...request,
-      task: "lesson_generation"
-    });
-
-    if (!response.success) {
-      return { response };
-    }
-
-    try {
-      let rawText = response.text.trim();
-      if (rawText.startsWith("```json")) rawText = rawText.substring(7);
-      if (rawText.startsWith("```")) rawText = rawText.substring(3);
-      if (rawText.endsWith("```")) rawText = rawText.substring(0, rawText.length - 3);
-      
-      const parsedJson = JSON.parse(rawText.trim());
-      const validatedData = LessonSchema.parse(parsedJson);
-
-      return {
-        data: validatedData,
-        response,
-      };
-    } catch (e: unknown) {
-      let errorMessage = "AI generated invalid JSON data.";
-      if (e instanceof ZodError) {
-        errorMessage = "AI generated data did not match the expected Lesson structure.";
-      }
-      
-      console.error(`[AI Orchestrator] [lesson_generation] Validation Failed: Provider: ${response.provider} | Error: ${errorMessage}`);
-      
-      return {
-        response: {
-          ...response,
-          success: false,
-          error: errorMessage,
-          errorCategory: "INVALID_RESPONSE"
-        }
-      };
-    }
+    const response = await this.generate({ ...request, task: "lesson_generation", responseFormat: "json" }, parseLesson);
+    return response.success ? { data: parseLesson(response.text), response } : { response };
   }
 }
 

@@ -1,8 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { CalendarDays, ChevronLeft, ChevronRight, Plus, Video, Image as ImageIcon, MonitorPlay, X } from "lucide-react";
-import { format, startOfMonth, endOfMonth, eachDayOfInterval, isSameMonth, isSameDay, subMonths, addMonths, parseISO } from "date-fns";
+import { CalendarDays, ChevronLeft, ChevronRight, Video, Image as ImageIcon, MonitorPlay, X } from "lucide-react";
+import { format, startOfMonth, endOfMonth, eachDayOfInterval, isSameDay, subMonths, addMonths, parseISO } from "date-fns";
 
 export type CalendarItem = {
   id: string;

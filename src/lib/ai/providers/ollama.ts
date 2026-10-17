@@ -7,9 +7,9 @@ export class OllamaProvider implements AIProvider {
     this.baseUrl = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
   }
 
-  async isAvailable(): Promise<boolean> {
+  async isAvailable(signal?: AbortSignal): Promise<boolean> {
     try {
-      const res = await fetch(this.baseUrl, { method: "GET" });
+      const res = await fetch(this.baseUrl, { method: "GET", signal });
       return res.ok;
     } catch {
       return false;
@@ -20,7 +20,7 @@ export class OllamaProvider implements AIProvider {
     return "ollama";
   }
 
-  async generateText(request: AIRequestModel): Promise<AIResponseModel> {
+  async generateText(request: AIRequestModel, signal?: AbortSignal): Promise<AIResponseModel> {
     const startTime = Date.now();
     const modelName = process.env.OLLAMA_MODEL || "llama3";
     
@@ -38,15 +38,17 @@ export class OllamaProvider implements AIProvider {
         system: request.systemPrompt,
         stream: false,
         options: {
-          temperature: request.temperature || 0.7,
+          temperature: request.temperature ?? 0.7,
+          num_predict: request.maxTokens ?? 4096,
         },
-        format: "json",
+        ...(request.responseFormat === "json" ? { format: "json" } : {}),
       };
 
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        signal,
       });
 
       if (!res.ok) {

@@ -24,7 +24,7 @@ export default function SettingsPage() {
             </div>
              <div className="p-4 bg-muted/50 rounded-xl border border-border/50">
               <h3 className="font-semibold mb-1">Subscription</h3>
-              <p className="text-sm text-muted-foreground">You are currently on the Creator Pro plan.</p>
+              <p className="text-sm text-muted-foreground">Paid subscriptions are not available yet. No paid plan is active.</p>
             </div>
         </div>
       </div>

@@ -1,16 +1,17 @@
 "use client"
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { Sparkles, Save, BookOpen, Loader2, CheckCircle, Download, Video, X } from "lucide-react";
 import { generateLessonAction, saveLessonAction, getLessonByIdAction } from "@/app/actions/ai-actions";
 import { generateVideoAction, checkVideoStatusAction } from "@/app/actions/video-actions";
-import { GeneratedLesson } from "@/lib/ai/types";
-import { useRouter, useSearchParams } from "next/navigation";
+import { GeneratedLesson, LessonSchema } from "@/lib/ai/types";
+import { useSearchParams } from "next/navigation";
 import { useEffect } from "react";
 import { Suspense } from "react";
+import { pollGeneratedVideo } from "@/lib/video/poll";
+import { lessonToSlides, slidesNarration } from "@/lib/video/slides";
 
 function LessonGeneratorContent() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const lessonId = searchParams.get("lessonId");
   const [topic, setTopic] = useState("");
@@ -28,6 +29,10 @@ function LessonGeneratorContent() {
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isEdited, setIsEdited] = useState(false);
+  const [savedLessonId, setSavedLessonId] = useState<string | undefined>(lessonId || undefined);
+  const markEdited = () => { setIsEdited(true); setSaved(false); };
+  const videoAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => videoAbort.current?.abort(), []);
 
   // Video generation state
   const [isVideoModalOpen, setIsVideoModalOpen] = useState(false);
@@ -45,11 +50,14 @@ function LessonGeneratorContent() {
           setSubject("Loaded from Library");
           setAudience("Loaded from Library");
           try {
-            const parsed = JSON.parse(res.lesson.script);
+            const parsed = LessonSchema.parse(JSON.parse(res.lesson.script));
             setResult(parsed);
             setSaved(true);
+            setSavedLessonId(res.lesson.id);
+            setIsEdited(false);
           } catch(e) {
             console.error("Failed to parse script", e);
+            setError("This saved lesson has an invalid format.");
           }
         } else {
           setError("Failed to load lesson from library.");
@@ -105,10 +113,12 @@ function LessonGeneratorContent() {
     setSaving(true);
     setSaveError(null);
     
-    const response = await saveLessonAction(result, topic);
+    const response = await saveLessonAction(result, topic, savedLessonId);
     
     if (response.success) {
       setSaved(true);
+      setSavedLessonId(response.id);
+      setIsEdited(false);
     } else {
       setSaveError(response.error || "Failed to save lesson.");
     }
@@ -116,50 +126,42 @@ function LessonGeneratorContent() {
   };
 
   const handleConvertToVideo = async () => {
-    if (!result || !result.summary) {
-      alert("Lesson summary is required to generate a video.");
-      return;
-    }
+    if (!result) return;
 
+    videoAbort.current?.abort();
+    const controller = new AbortController();
+    videoAbort.current = controller;
     setIsVideoModalOpen(true);
     setIsGeneratingVideo(true);
-    setVideoStatus("Initializing...");
+    setVideoStatus("Creating slides and narration…");
     setVideoUrl(null);
 
-    // Let D-ID use its default presenter avatar (clean background).
-    // To use a custom avatar, provide a direct public URL to a .jpg/.png image.
-    const res = await generateVideoAction(result.summary);
-
-    if (!res.success || !res.id) {
-      setVideoStatus("Failed to start video generation: " + res.error);
-      setIsGeneratingVideo(false);
-      return;
+    // A short explainer: slides with the lesson's key notes, presented by the avatar.
+    const slides = lessonToSlides(result);
+    const narration = slidesNarration(slides);
+    // About 15 characters of speech per second; local rendering takes roughly 12x the speech length.
+    const minutes = Math.max(1, Math.round((narration.length / 15) * 12 / 60));
+    const started = Date.now();
+    try {
+      const res = await generateVideoAction(narration, undefined, { name: result.title.slice(0, 150), slides });
+      if (controller.signal.aborted) return;
+      if (!res.success || !res.id) throw new Error(res.error || "Failed to start generation.");
+      const local = res.id.startsWith("local_");
+      const url = await pollGeneratedVideo(res.id, checkVideoStatusAction, {
+        signal: controller.signal,
+        onStatus: status => {
+          const elapsed = Math.floor((Date.now() - started) / 60000);
+          setVideoStatus(status === "created"
+            ? "Queued: waiting for the renderer…"
+            : local ? `Rendering ${slides.length} slides with your presenter (about ${minutes} min, ${elapsed} min so far)…` : "Rendering your video…");
+        },
+      });
+      if (!controller.signal.aborted) { setVideoUrl(url); setVideoStatus(null); }
+    } catch (error) {
+      if (!controller.signal.aborted) setVideoStatus(error instanceof Error ? error.message : "Video generation failed.");
+    } finally {
+      if (!controller.signal.aborted) setIsGeneratingVideo(false);
     }
-
-    const videoId = res.id;
-    setVideoStatus("Generating video (this may take a minute)...");
-
-    const pollInterval = setInterval(async () => {
-      const statusRes = await checkVideoStatusAction(videoId);
-      if (statusRes.success) {
-        if (statusRes.status === "done" && statusRes.videoUrl) {
-          clearInterval(pollInterval);
-          setVideoUrl(statusRes.videoUrl);
-          setVideoStatus(null);
-          setIsGeneratingVideo(false);
-        } else if (statusRes.status === "error") {
-          clearInterval(pollInterval);
-          setVideoStatus("Video generation failed on provider.");
-          setIsGeneratingVideo(false);
-        } else {
-          setVideoStatus(`Status: ${statusRes.status}...`);
-        }
-      } else {
-        clearInterval(pollInterval);
-        setVideoStatus("Error checking status: " + statusRes.error);
-        setIsGeneratingVideo(false);
-      }
-    }, 5000);
   };
 
   const handleDownloadPdf = async () => {
@@ -169,6 +171,7 @@ function LessonGeneratorContent() {
     const { default: autoTable } = await import("jspdf-autotable");
     
     const doc = new jsPDF();
+    type TableDocument = typeof doc & { lastAutoTable: { finalY: number } };
     let yPos = 20;
 
     // Title
@@ -195,7 +198,7 @@ function LessonGeneratorContent() {
         theme: 'plain',
         styles: { fontSize: 12, cellPadding: 2 },
       });
-      yPos = (doc as any).lastAutoTable.finalY + 10;
+      yPos = (doc as TableDocument).lastAutoTable.finalY + 10;
     }
 
     // Sections
@@ -232,7 +235,7 @@ function LessonGeneratorContent() {
           theme: 'plain',
           styles: { fontSize: 12, cellPadding: 2 },
         });
-        yPos = (doc as any).lastAutoTable.finalY + 10;
+        yPos = (doc as TableDocument).lastAutoTable.finalY + 10;
       }
     };
 
@@ -258,7 +261,7 @@ function LessonGeneratorContent() {
     // Footer - Powered by CreatorOS
     doc.setFontSize(10);
     doc.setTextColor(150);
-    const pageCount = (doc.internal as any).getNumberOfPages();
+    const pageCount = doc.getNumberOfPages();
     for (let i = 1; i <= pageCount; i++) {
       doc.setPage(i);
       doc.text("Powered by CreatorOS", doc.internal.pageSize.getWidth() / 2, doc.internal.pageSize.getHeight() - 10, { align: "center" });
@@ -431,13 +434,13 @@ function LessonGeneratorContent() {
                     <input 
                       className="text-3xl font-extrabold text-foreground bg-transparent border-b border-transparent hover:border-border focus:border-indigo-500 focus:outline-none w-full text-center transition-colors" 
                       value={result.title} 
-                      onChange={(e) => { setResult({...result, title: e.target.value}); setIsEdited(true); }}
+                      onChange={(e) => { setResult({...result, title: e.target.value}); markEdited(); }}
                     />
                     <textarea 
                       className="text-lg text-muted-foreground leading-relaxed bg-transparent border border-transparent hover:border-border focus:border-indigo-500 focus:outline-none w-full text-center resize-none rounded-md transition-colors custom-scrollbar" 
                       rows={3}
                       value={result.introduction}
-                      onChange={(e) => { setResult({...result, introduction: e.target.value}); setIsEdited(true); }}
+                      onChange={(e) => { setResult({...result, introduction: e.target.value}); markEdited(); }}
                     />
                   </div>
 
@@ -447,7 +450,7 @@ function LessonGeneratorContent() {
                       <textarea 
                         className="w-full bg-transparent border border-transparent hover:border-border focus:border-indigo-500 focus:outline-none rounded-md resize-y min-h-[100px] text-foreground/80 transition-colors custom-scrollbar"
                         value={result.learningObjectives.join('\n')}
-                        onChange={(e) => { setResult({...result, learningObjectives: e.target.value.split('\n')}); setIsEdited(true); }}
+                        onChange={(e) => { setResult({...result, learningObjectives: e.target.value.split('\n')}); markEdited(); }}
                       />
                     </div>
                   )}
@@ -460,9 +463,9 @@ function LessonGeneratorContent() {
                           value={section.heading}
                           onChange={(e) => {
                             const newSections = [...result.sections];
-                            newSections[i].heading = e.target.value;
+                            newSections[i] = { ...newSections[i], heading: e.target.value };
                             setResult({...result, sections: newSections});
-                            setIsEdited(true);
+                            markEdited();
                           }}
                         />
                         <textarea 
@@ -470,9 +473,9 @@ function LessonGeneratorContent() {
                           value={section.content}
                           onChange={(e) => {
                             const newSections = [...result.sections];
-                            newSections[i].content = e.target.value;
+                            newSections[i] = { ...newSections[i], content: e.target.value };
                             setResult({...result, sections: newSections});
-                            setIsEdited(true);
+                            markEdited();
                           }}
                         />
                       </div>
@@ -485,7 +488,7 @@ function LessonGeneratorContent() {
                       <textarea 
                         className="w-full bg-transparent border border-transparent hover:border-border focus:border-indigo-500 focus:outline-none rounded-md resize-y min-h-[100px] text-foreground/80 transition-colors custom-scrollbar"
                         value={result.examples.join('\n')}
-                        onChange={(e) => { setResult({...result, examples: e.target.value.split('\n')}); setIsEdited(true); }}
+                        onChange={(e) => { setResult({...result, examples: e.target.value.split('\n')}); markEdited(); }}
                       />
                     </div>
                   )}
@@ -497,7 +500,7 @@ function LessonGeneratorContent() {
                         <textarea 
                           className="flex-1 w-full text-sm text-foreground/80 bg-transparent border border-transparent hover:border-border focus:border-indigo-500 focus:outline-none resize-y min-h-[100px] rounded-md transition-colors custom-scrollbar"
                           value={result.keyPoints.join('\n')}
-                          onChange={(e) => { setResult({...result, keyPoints: e.target.value.split('\n')}); setIsEdited(true); }}
+                          onChange={(e) => { setResult({...result, keyPoints: e.target.value.split('\n')}); markEdited(); }}
                         />
                       </div>
                     )}
@@ -508,7 +511,7 @@ function LessonGeneratorContent() {
                         <textarea 
                           className="flex-1 w-full text-sm text-foreground/80 bg-transparent border border-transparent hover:border-border focus:border-indigo-500 focus:outline-none resize-y min-h-[100px] rounded-md transition-colors custom-scrollbar"
                           value={result.questions.join('\n')}
-                          onChange={(e) => { setResult({...result, questions: e.target.value.split('\n')}); setIsEdited(true); }}
+                          onChange={(e) => { setResult({...result, questions: e.target.value.split('\n')}); markEdited(); }}
                         />
                       </div>
                     )}
@@ -518,7 +521,7 @@ function LessonGeneratorContent() {
                     <textarea 
                       className="text-muted-foreground italic w-full max-w-2xl mx-auto bg-transparent border border-transparent hover:border-border focus:border-indigo-500 focus:outline-none text-center resize-y min-h-[80px] rounded-md transition-colors custom-scrollbar"
                       value={result.summary}
-                      onChange={(e) => { setResult({...result, summary: e.target.value}); setIsEdited(true); }}
+                      onChange={(e) => { setResult({...result, summary: e.target.value}); markEdited(); }}
                     />
                   </div>
                   
@@ -528,7 +531,7 @@ function LessonGeneratorContent() {
                       <textarea 
                         className="w-full bg-transparent border border-transparent hover:border-amber-500/50 focus:border-amber-500 focus:outline-none resize-y min-h-[100px] rounded-md transition-colors custom-scrollbar"
                         value={result.teachingTips.join('\n')}
-                        onChange={(e) => { setResult({...result, teachingTips: e.target.value.split('\n')}); setIsEdited(true); }}
+                        onChange={(e) => { setResult({...result, teachingTips: e.target.value.split('\n')}); markEdited(); }}
                       />
                     </div>
                   )}
@@ -556,7 +559,7 @@ function LessonGeneratorContent() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-background border border-border/50 rounded-3xl p-6 w-full max-w-3xl shadow-2xl relative flex flex-col items-center">
             <button 
-              onClick={() => setIsVideoModalOpen(false)}
+              onClick={() => { videoAbort.current?.abort(); setIsVideoModalOpen(false); setIsGeneratingVideo(false); }}
               className="absolute top-4 right-4 p-2 rounded-full hover:bg-muted text-muted-foreground transition-colors"
             >
               <X className="w-5 h-5" />
